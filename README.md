@@ -475,6 +475,22 @@ HDD LEDs from mdadm's monitor (`PROGRAM` in `mdadm.conf`, on every RAID event) a
 Both scripts and their units are packaged as [`ds212j-support`](pkg/ds212j-support/),
 built with `dpkg-deb --root-owner-group -b pkg/ds212j-support`.
 
+### LAN LED: dark at 1000 Mb/s
+
+On a gigabit switch, the front LAN LED stayed off (at 100 Mb/s it worked). The LED is wired to
+**LED[1] of the Marvell 88E1116R PHY** (PHY ID `0x01410e40`, MDIO address 8). Synology's
+`synobios/mv6281/ds212j.c` (`SetPhyLed()`) programs only that LED, in page 3, register 16,
+bits 7:4: `0x1` for on (link/activity), `0x8` for off during hibernation.
+
+Reading the register on the running system (standard MII ioctls on `eth0`) gave `0x101E`, the
+PHY's power-on default, which Linux doesn't touch for this PHY. LED[1] was already `0x1`, but
+LED[0] = `0xE` is one of Marvell's **dual-LED modes**: LED[0] and LED[1] are driven as a pair,
+and at 1000 Mb/s the link is shown on the LED[0] pin instead. Taking LED[0] out of dual mode
+(`0x0`) makes the front LED work at every speed. I tested it on the hardware (register `0x1010`).
+
+`ds212j-phy-led on|off|show` sets this, and a `/etc/network/if-up.d/` hook runs it whenever
+`eth0` comes up. During disk hibernation the LAN LED is forced off, like the other LEDs.
+
 ### Fan: an interrupt storm in the upstream DT
 
 After the first boot, `systemd-udevd` used ~25% CPU on an idle system. The upstream
@@ -539,7 +555,8 @@ Measured on this unit, level VERY_LOW (2) actually stops the fan. DSM does the s
   loses at most a day of logs. The root filesystem is already mounted `noatime`.
 - **The front panel looks like DSM's.** The DS212j is `HIBER_LED_POWER_ONLY` in Synology's
   source. While both disks are in standby (`hdparm -C`, which doesn't wake them), only the
-  power LED stays lit: STATUS goes off (`7`) and the green HDD LEDs go off. The "presence" bit
+  power LED stays lit: STATUS goes off (`7`), the LAN LED is forced off, and the green HDD
+  LEDs go off. The "presence" bit
   of the SATA LED register (`0xF108002C` bit 2) is cleared through `/dev/mem`, so the LEDs only
   blink on activity. The fan stops too. Everything returns when a disk wakes up.
 

@@ -4,8 +4,9 @@
 #                              or SMART says it is failing
 #   STATUS     green         = all volumes (md arrays) normal
 #   STATUS     orange blink  = a volume is degraded/crashed, or no volume exists
+#   LAN        on = link, blink = activity (Ethernet PHY LED[1], ds212j-phy-led)
 #   Hibernation (all internal disks in standby): only the POWER LED stays lit,
-#   STATUS off and green HDD LEDs off (Synology: HIBER_LED_POWER_ONLY).
+#   STATUS, LAN and green HDD LEDs off (Synology: HIBER_LED_POWER_ONLY).
 # The green HDD LEDs are driven by the SATA controller itself (on = present,
 # blink = activity). Bay 1 = SATA port ata1, bay 2 = ata2.
 # Run by mdadm --monitor (PROGRAM, on every RAID event), a timer and at boot.
@@ -54,11 +55,13 @@ for bay in 1 2; do
 	[ "$fault" = 1 ] && logger -t ds212j-leds "bay $bay (${dev:-empty}): FAULT, amber LED on"
 done
 
-# --- green HDD LEDs: presence mode, off while hibernating ---
+# --- green HDD LEDs (presence mode) and LAN LED: off while hibernating ---
 if [ "$asleep" = 1 ]; then
 	/usr/sbin/ds212j-sata-leds presence off
+	/usr/sbin/ds212j-phy-led off 2>/dev/null
 else
 	/usr/sbin/ds212j-sata-leds presence on
+	/usr/sbin/ds212j-phy-led on 2>/dev/null
 fi
 
 # --- STATUS LED ---

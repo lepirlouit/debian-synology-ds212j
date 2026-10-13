@@ -1,0 +1,4 @@
+#!/bin/sh
+# DS-212j: configure the front LAN LED (Ethernet PHY LED[1]) whenever eth0 comes up.
+[ "$IFACE" = eth0 ] || exit 0
+[ -x /usr/sbin/ds212j-phy-led ] && /usr/sbin/ds212j-phy-led on || true

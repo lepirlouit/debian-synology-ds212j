@@ -1,0 +1,44 @@
+#!/usr/bin/python3
+# DS-212j front LAN LED = LED[1] of the Marvell 88E1116R PHY (Synology synobios SetPhyLed()).
+# LED function control: page 3, register 16; bits 3:0 = LED[0], bits 7:4 = LED[1].
+# The PHY powers up with 0x101E: LED[0] = 0xE is a "dual LED" mode in which, at 1000 Mb/s,
+# the link is shown on the LED[0] pin instead, so the front LED stays dark on gigabit.
+#   on   -> LED[0] = 0x0 (out of dual mode), LED[1] = 0x1: on = link, blink = activity
+#           (0x1 is what DSM sets; tested on the hardware at 100 and 1000 Mb/s)
+#   off  -> LED[1] = 0x8: forced off (DSM: hibernation, only the power LED stays lit)
+#   show -> print the current page-3 register 16
+#   set 0xNNNN -> write page-3 register 16 (for experiments)
+# Uses the standard MII ioctls (SIOCGMIIPHY/SIOCGMIIREG/SIOCSMIIREG) on eth0.
+import fcntl, socket, struct, sys
+
+IFACE = "eth0"
+SIOCGMIIPHY, SIOCGMIIREG, SIOCSMIIREG = 0x8947, 0x8948, 0x8949
+PAGE_REG, LED_FUNC_REG, LED_PAGE = 22, 16, 3
+
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def ioctl(req, phy, reg, val=0):
+    ifr = struct.pack("16sHHHH", IFACE.encode(), phy, reg, val, 0)
+    return struct.unpack("16sHHHH", fcntl.ioctl(s, req, ifr))
+
+phy = ioctl(SIOCGMIIPHY, 0, 0)[1]
+rd = lambda reg: ioctl(SIOCGMIIREG, phy, reg)[4]
+wr = lambda reg, val: ioctl(SIOCSMIIREG, phy, reg, val)
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
+if cmd not in ("on", "off", "show", "set") or (cmd == "set" and len(sys.argv) != 3):
+    sys.exit("usage: ds212j-phy-led on|off|show|set 0xNNNN")
+
+old_page = rd(PAGE_REG)
+wr(PAGE_REG, LED_PAGE)
+try:
+    v = rd(LED_FUNC_REG)
+    if cmd == "show":
+        print(f"PHY {phy}: page 3 reg 16 = 0x{v:04x} (LED0=0x{v & 0xf:x} LED1=0x{(v >> 4) & 0xf:x} LED2=0x{(v >> 8) & 0xf:x})")
+    elif cmd == "set":
+        wr(LED_FUNC_REG, int(sys.argv[2], 16))
+    else:
+        v = (v & 0xff00) | (0x0010 if cmd == "on" else 0x0080)
+        wr(LED_FUNC_REG, v)
+finally:
+    wr(PAGE_REG, old_page)
