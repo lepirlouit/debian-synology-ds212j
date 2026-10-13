@@ -391,6 +391,15 @@ A oneshot systemd unit sends &quot;power LED steady + beep + STATUS&quot; when t
 
 Both scripts and their units are packaged as [https://github.com/lepirlouit/debian-synology-ds212j/tree/main/pkg/ds212j-support <code>ds212j-support</code>], built with <code>dpkg-deb --root-owner-group -b pkg/ds212j-support</code>.
 
+<span id="lan-led-dark-at-1000-mbs"></span>
+=== LAN LED: dark at 1000 Mb/s ===
+
+On a gigabit switch, the front LAN LED stayed off (at 100 Mb/s it worked). The LED is wired to '''LED[1] of the Marvell 88E1116R PHY''' (PHY ID <code>0x01410e40</code>, MDIO address 8). Synology's <code>synobios/mv6281/ds212j.c</code> (<code>SetPhyLed()</code>) programs only that LED, in page 3, register 16, bits 7:4: <code>0x1</code> for on (link/activity), <code>0x8</code> for off during hibernation.
+
+Reading the register on the running system (standard MII ioctls on <code>eth0</code>) gave <code>0x101E</code>, the PHY's power-on default, which Linux doesn't touch for this PHY. LED[1] was already <code>0x1</code>, but LED[0] = <code>0xE</code> is one of Marvell's '''dual-LED modes''': LED[0] and LED[1] are driven as a pair, and at 1000 Mb/s the link is shown on the LED[0] pin instead. Taking LED[0] out of dual mode (<code>0x0</code>) makes the front LED work at every speed. I tested it on the hardware (register <code>0x1010</code>).
+
+<code>ds212j-phy-led on|off|show</code> sets this, and a <code>/etc/network/if-up.d/</code> hook runs it whenever <code>eth0</code> comes up. During disk hibernation the LAN LED is forced off, like the other LEDs.
+
 <span id="fan-an-interrupt-storm-in-the-upstream-dt"></span>
 === Fan: an interrupt storm in the upstream DT ===
 
@@ -430,7 +439,7 @@ The mode is set in <code>/etc/default/ds212j-fan</code> (<code>MODE=full|cool|qu
 
 * '''Spin-down:''' a udev rule applies <code>hdparm -S</code> to the two internal disks whenever they appear. The delay is set in <code>/etc/default/ds212j-disks</code> (<code>SPINDOWN_MINUTES=10</code>, like DSM's &quot;HDD hibernation&quot; setting).
 * '''Nothing writes to the disks every few minutes.''' journald keeps the journal in RAM (<code>Storage=volatile</code>, 16 MB), <code>rsyslog</code> is removed, and <code>ds212j-logsave</code> appends the journal to <code>/var/log/journal-saved/YYYY-MM.log</code> once a day and at every clean shutdown. A power cut loses at most a day of logs. The root filesystem is already mounted <code>noatime</code>.
-* '''The front panel looks like DSM's.''' The DS212j is <code>HIBER_LED_POWER_ONLY</code> in Synology's source. While both disks are in standby (<code>hdparm -C</code>, which doesn't wake them), only the power LED stays lit: STATUS goes off (<code>7</code>) and the green HDD LEDs go off. The &quot;presence&quot; bit of the SATA LED register (<code>0xF108002C</code> bit 2) is cleared through <code>/dev/mem</code>, so the LEDs only blink on activity. The fan stops too. Everything returns when a disk wakes up.
+* '''The front panel looks like DSM's.''' The DS212j is <code>HIBER_LED_POWER_ONLY</code> in Synology's source. While both disks are in standby (<code>hdparm -C</code>, which doesn't wake them), only the power LED stays lit: STATUS goes off (<code>7</code>), the LAN LED is forced off, and the green HDD LEDs go off. The &quot;presence&quot; bit of the SATA LED register (<code>0xF108002C</code> bit 2) is cleared through <code>/dev/mem</code>, so the LEDs only blink on activity. The fan stops too. Everything returns when a disk wakes up.
 
 To check whether the disks are really asleep: <code>sudo hdparm -C /dev/sda /dev/sdb</code>.
 
