@@ -1,0 +1,14 @@
+#!/bin/sh
+# Apply the DS-212j disk hibernation delay to an internal disk (bay 1/2 = ata1/ata2).
+# Called by udev with the device node, e.g. /dev/sda.
+set -u
+dev=$1
+case "$(readlink -f /sys/class/block/${dev##*/})" in */ata[12]/*) ;; *) exit 0 ;; esac
+SPINDOWN_MINUTES=10
+[ -r /etc/default/ds212j-disks ] && . /etc/default/ds212j-disks
+m=$SPINDOWN_MINUTES
+if   [ "$m" -le 0 ];  then s=0                      # disabled
+elif [ "$m" -le 20 ]; then s=$(( m * 12 ))          # units of 5 s
+else                       s=$(( 240 + m / 30 ))    # units of 30 min
+fi
+/usr/sbin/hdparm -q -S "$s" "$dev"

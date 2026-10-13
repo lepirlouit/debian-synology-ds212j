@@ -1,0 +1,344 @@
+From 1a2bcb37376977bc4b93a09dd4ecf2ea62f7f5b5 Mon Sep 17 00:00:00 2001
+From: lepirlouit <bdb@aloalto.com>
+Date: Tue, 13 Oct 2026 14:33:08 +0200
+Subject: [PATCH 1/3] arm: kirkwood: add Synology DS-212j board
+
+Mainline port for the Synology DS-212j (88F6281 A1, 2x128 MB DDR2,
+4 MB SPI NOR). DDR init values taken from the stock Synology U-Boot
+1.1.4 kwbimage header. Uses the upstream kirkwood-ds212j DT, bootstd,
+SATA (sata_mv), USB storage and SPI flash environment at 0x3D0000.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/mach-kirkwood/Kconfig     |  7 +++
+ board/Synology/ds212j/Kconfig      | 12 ++++
+ board/Synology/ds212j/MAINTAINERS  |  6 ++
+ board/Synology/ds212j/Makefile     |  3 +
+ board/Synology/ds212j/ds212j.c     | 92 ++++++++++++++++++++++++++++++
+ board/Synology/ds212j/kwbimage.cfg | 36 ++++++++++++
+ configs/ds212j_defconfig           | 70 +++++++++++++++++++++++
+ include/configs/ds212j.h           | 26 +++++++++
+ 8 files changed, 252 insertions(+)
+ create mode 100644 board/Synology/ds212j/Kconfig
+ create mode 100644 board/Synology/ds212j/MAINTAINERS
+ create mode 100644 board/Synology/ds212j/Makefile
+ create mode 100644 board/Synology/ds212j/ds212j.c
+ create mode 100644 board/Synology/ds212j/kwbimage.cfg
+ create mode 100644 configs/ds212j_defconfig
+ create mode 100644 include/configs/ds212j.h
+
+diff --git a/arch/arm/mach-kirkwood/Kconfig b/arch/arm/mach-kirkwood/Kconfig
+index f1ccedba..99c663b9 100644
+--- a/arch/arm/mach-kirkwood/Kconfig
++++ b/arch/arm/mach-kirkwood/Kconfig
+@@ -52,6 +52,12 @@ config TARGET_DS109
+ 	select SHEEVA_88SV131
+ 	select KIRKWOOD_COMMON
+ 
++config TARGET_DS212J
++	bool "Synology DS212j"
++	select KW88F6281
++	select SHEEVA_88SV131
++	select KIRKWOOD_COMMON
++
+ config TARGET_GURUPLUG
+ 	bool "GuruPlug Board"
+ 	select KW88F6281
+@@ -181,6 +187,7 @@ config KIRKWOOD_PCIE_INIT
+ source "board/Marvell/openrd/Kconfig"
+ source "board/Marvell/dreamplug/Kconfig"
+ source "board/Synology/ds109/Kconfig"
++source "board/Synology/ds212j/Kconfig"
+ source "board/Marvell/guruplug/Kconfig"
+ source "board/Marvell/sheevaplug/Kconfig"
+ source "board/buffalo/lsxl/Kconfig"
+diff --git a/board/Synology/ds212j/Kconfig b/board/Synology/ds212j/Kconfig
+new file mode 100644
+index 00000000..538990cd
+--- /dev/null
++++ b/board/Synology/ds212j/Kconfig
+@@ -0,0 +1,12 @@
++if TARGET_DS212J
++
++config SYS_BOARD
++	default "ds212j"
++
++config SYS_VENDOR
++	default "Synology"
++
++config SYS_CONFIG_NAME
++	default "ds212j"
++
++endif
+diff --git a/board/Synology/ds212j/MAINTAINERS b/board/Synology/ds212j/MAINTAINERS
+new file mode 100644
+index 00000000..df6ae53c
+--- /dev/null
++++ b/board/Synology/ds212j/MAINTAINERS
+@@ -0,0 +1,6 @@
++DS212J BOARD
++M:	(unmaintained, out-of-tree port)
++S:	Maintained
++F:	board/Synology/ds212j/
++F:	include/configs/ds212j.h
++F:	configs/ds212j_defconfig
+diff --git a/board/Synology/ds212j/Makefile b/board/Synology/ds212j/Makefile
+new file mode 100644
+index 00000000..b6e6c9d8
+--- /dev/null
++++ b/board/Synology/ds212j/Makefile
+@@ -0,0 +1,3 @@
++# SPDX-License-Identifier: GPL-2.0+
++
++obj-y	:= ds212j.o
+diff --git a/board/Synology/ds212j/ds212j.c b/board/Synology/ds212j/ds212j.c
+new file mode 100644
+index 00000000..e6c3d402
+--- /dev/null
++++ b/board/Synology/ds212j/ds212j.c
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Synology DS-212j (Marvell 88F6281 A1, 256 MB DDR2, 4 MB SPI NOR)
++ *
++ * Based on board/Synology/ds109/ds109.c
++ */
++
++#include <config.h>
++#include <init.h>
++#include <asm/global_data.h>
++#include <asm/io.h>
++#include <asm/arch/cpu.h>
++#include <asm/arch/soc.h>
++#include <asm/arch/mpp.h>
++
++DECLARE_GLOBAL_DATA_PTR;
++
++/* GPIO 20..23: HDD LEDs (active low) -> outputs, high = off */
++#define DS212J_HDD_LEDS		(0xf << 20)
++/* GPIO 32..34: fan speed select (bits 0..2 of the high bank), 35: fan alarm */
++#define DS212J_FAN_MASK		0x7
++#define DS212J_FAN_DEFAULT	0x3	/* ~3800 rpm until Linux takes over */
++
++int board_early_init_f(void)
++{
++	mvebu_config_gpio(DS212J_HDD_LEDS, DS212J_FAN_DEFAULT,
++			  ~DS212J_HDD_LEDS, ~DS212J_FAN_MASK);
++
++	static const u32 kwmpp_config[] = {
++		MPP0_SPI_SCn,		/* SPI flash */
++		MPP1_SPI_MOSI,
++		MPP2_SPI_SCK,
++		MPP3_SPI_MISO,
++		MPP4_GPIO,
++		MPP5_GPO,
++		MPP6_SYSRST_OUTn,
++		MPP7_GPO,
++		MPP8_TW_SDA,		/* I2C: RTC (s35390a) */
++		MPP9_TW_SCK,
++		MPP10_UART0_TXD,	/* console */
++		MPP11_UART0_RXD,
++		MPP12_GPO,		/* alarm LED */
++		MPP13_UART1_TXD,	/* power/LED microcontroller */
++		MPP14_UART1_RXD,
++		MPP15_GPIO,
++		MPP16_GPIO,
++		MPP17_GPIO,
++		MPP18_GPO,
++		MPP19_GPO,
++		MPP20_GPIO,		/* HDD2 green LED */
++		MPP21_GPIO,		/* HDD1 green LED */
++		MPP22_GPIO,		/* HDD2 amber LED */
++		MPP23_GPIO,		/* HDD1 amber LED */
++		MPP24_GPIO,
++		MPP25_GPIO,
++		MPP26_GPIO,
++		MPP27_GPIO,
++		MPP28_GPIO,
++		MPP29_GPIO,
++		MPP30_GPIO,
++		MPP31_GPIO,
++		MPP32_GPIO,		/* fan speed A */
++		MPP33_GPIO,		/* fan speed B */
++		MPP34_GPIO,		/* fan speed C */
++		MPP35_GPIO,		/* fan alarm */
++		MPP36_GPIO,
++		MPP37_GPIO,
++		MPP38_GPIO,
++		MPP39_GPIO,
++		MPP40_GPIO,
++		MPP41_GPIO,
++		MPP42_GPIO,
++		MPP43_GPIO,
++		MPP44_GPIO,
++		MPP45_GPIO,
++		MPP46_GPIO,
++		MPP47_GPIO,
++		MPP48_GPIO,
++		MPP49_GPIO,
++		0
++	};
++	kirkwood_mpp_conf(kwmpp_config, NULL);
++	return 0;
++}
++
++int board_init(void)
++{
++	/* address of boot parameters */
++	gd->bd->bi_boot_params = mvebu_sdram_bar(0) + 0x100;
++
++	return 0;
++}
+diff --git a/board/Synology/ds212j/kwbimage.cfg b/board/Synology/ds212j/kwbimage.cfg
+new file mode 100644
+index 00000000..5fc3c812
+--- /dev/null
++++ b/board/Synology/ds212j/kwbimage.cfg
+@@ -0,0 +1,36 @@
++# SPDX-License-Identifier: GPL-2.0+
++#
++# Synology DS-212j: Marvell 88F6281 A1, 2 x 128 MB DDR2 (CS0 + CS1), 16-bit bus.
++# The DATA lines below are copied verbatim from the extension header of the
++# stock Synology U-Boot 1.1.4 (Marvell 3.4.4) found at offset 0 of the SPI flash.
++
++BOOT_FROM	spi
++
++DATA 0xFFD100E0 0x1B1B1B9B	# SoC: L2 / SRAM timing
++DATA 0xFFD20134 0xBBBBBBBB	# L2 RAM timing 0
++DATA 0xFFD20138 0x00BBBBBB	# L2 RAM timing 1
++DATA 0xFFD01400 0x43000C30	# DDR Configuration
++DATA 0xFFD01404 0x39743000	# DDR Controller Control Low
++DATA 0xFFD01408 0x23125551	# DDR Timing Low
++DATA 0xFFD0140C 0x00000833	# DDR Timing High
++DATA 0xFFD01410 0x000000DD	# DDR Address Control (2 CS)
++DATA 0xFFD01414 0x00000000	# DDR Open Pages Control
++DATA 0xFFD01418 0x00000000	# DDR Operation
++DATA 0xFFD0141C 0x00000C62	# DDR Mode (CL6)
++DATA 0xFFD01420 0x00000042	# DDR Extended Mode
++DATA 0xFFD01424 0x0000F1FF	# DDR Controller Control High
++DATA 0xFFD01428 0x00085520	# DDR2 ODT Read Timing
++DATA 0xFFD0147C 0x00008552	# DDR2 ODT Write Timing
++DATA 0xFFD01500 0x00000000	# CS0 base 0x00000000
++DATA 0xFFD01504 0x07FFFFF1	# CS0 size 128 MB, enabled
++DATA 0xFFD01508 0x08000000	# CS1 base 0x08000000
++DATA 0xFFD0150C 0x07FFFFF5	# CS1 size 128 MB, enabled
++DATA 0xFFD01510 0x20000000	# CS2 base
++DATA 0xFFD01514 0x00000000	# CS2 disabled
++DATA 0xFFD01518 0x30000000	# CS3 base
++DATA 0xFFD0151C 0x00000000	# CS3 disabled
++DATA 0xFFD01494 0x00330033	# DDR ODT Control Low
++DATA 0xFFD01498 0x00000000	# DDR ODT Control High
++DATA 0xFFD0149C 0x0000F40F	# CPU ODT Control
++DATA 0xFFD01480 0x00000001	# DDR Initialization Control: start
++DATA 0x0 0x0
+diff --git a/configs/ds212j_defconfig b/configs/ds212j_defconfig
+new file mode 100644
+index 00000000..c4a92886
+--- /dev/null
++++ b/configs/ds212j_defconfig
+@@ -0,0 +1,70 @@
++CONFIG_ARM=y
++CONFIG_SKIP_LOWLEVEL_INIT=y
++CONFIG_SYS_DCACHE_OFF=y
++CONFIG_ARCH_CPU_INIT=y
++CONFIG_SYS_THUMB_BUILD=y
++CONFIG_ARCH_KIRKWOOD=y
++CONFIG_SUPPORT_PASSING_ATAGS=y
++CONFIG_CMDLINE_TAG=y
++CONFIG_INITRD_TAG=y
++CONFIG_SYS_KWD_CONFIG="board/Synology/ds212j/kwbimage.cfg"
++CONFIG_TEXT_BASE=0x600000
++CONFIG_NR_DRAM_BANKS=2
++CONFIG_TARGET_DS212J=y
++CONFIG_ENV_SIZE=0x10000
++CONFIG_ENV_OFFSET=0x3D0000
++CONFIG_ENV_SECT_SIZE=0x10000
++CONFIG_DEFAULT_DEVICE_TREE="marvell/kirkwood-ds212j"
++CONFIG_SYS_LOAD_ADDR=0x800000
++CONFIG_IDENT_STRING="\nSynology DS-212j"
++CONFIG_LTO=y
++CONFIG_BOOTSTD_FULL=y
++CONFIG_BOOTDELAY=3
++CONFIG_USE_PREBOOT=y
++CONFIG_SYS_PBSIZE=1050
++CONFIG_SYS_PROMPT="DS212j> "
++CONFIG_SYS_MAXARGS=32
++# CONFIG_BOOTM_PLAN9 is not set
++# CONFIG_BOOTM_RTEMS is not set
++# CONFIG_BOOTM_VXWORKS is not set
++# CONFIG_CMD_ELF is not set
++CONFIG_CMD_SF=y
++CONFIG_CMD_USB=y
++CONFIG_CMD_I2C=y
++# CONFIG_CMD_SETEXPR is not set
++CONFIG_CMD_LOADB=y
++CONFIG_CMD_LOADY=y
++CONFIG_PARTITION_TYPE_GUID=y
++CONFIG_OF_CONTROL=y
++CONFIG_ENV_OVERWRITE=y
++CONFIG_ENV_IS_IN_SPI_FLASH=y
++CONFIG_ENV_SPI_MAX_HZ=50000000
++CONFIG_ENV_RELOC_GD_ENV_ADDR=y
++CONFIG_VERSION_VARIABLE=y
++CONFIG_NETCONSOLE=y
++CONFIG_NET_RANDOM_ETHADDR=y
++CONFIG_SATA=y
++CONFIG_SATA_MV=y
++CONFIG_SYS_SATA_MAX_DEVICE=2
++CONFIG_LBA48=y
++CONFIG_SYS_64BIT_LBA=y
++CONFIG_KIRKWOOD_GPIO=y
++CONFIG_DM_I2C=y
++CONFIG_SYS_I2C_MVTWSI=y
++# CONFIG_MMC is not set
++CONFIG_MTD=y
++CONFIG_DM_SPI_FLASH=y
++CONFIG_SPI_FLASH_MACRONIX=y
++CONFIG_SPI_FLASH_STMICRO=y
++CONFIG_SPI_FLASH_WINBOND=y
++CONFIG_SPI_FLASH_SPANSION=y
++CONFIG_MVGBE=y
++CONFIG_MII=y
++CONFIG_PHY_MARVELL=y
++CONFIG_SPI=y
++CONFIG_DM_SPI=y
++CONFIG_KIRKWOOD_SPI=y
++CONFIG_USB=y
++CONFIG_USB_EHCI_HCD=y
++CONFIG_USB_STORAGE=y
++CONFIG_LZMA=y
+diff --git a/include/configs/ds212j.h b/include/configs/ds212j.h
+new file mode 100644
+index 00000000..90b748c5
+--- /dev/null
++++ b/include/configs/ds212j.h
+@@ -0,0 +1,26 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Synology DS-212j
++ */
++
++#ifndef _CONFIG_DS212J_H
++#define _CONFIG_DS212J_H
++
++#include "mv-common.h"
++
++#define KERNEL_ADDR_R	__stringify(0x800000)
++#define FDT_ADDR_R	__stringify(0x2c00000)
++#define RAMDISK_ADDR_R	__stringify(0x3000000)
++#define SCRIPT_ADDR_R	__stringify(0x200000)
++#define PXEFILE_ADDR_R	__stringify(0x300000)
++
++#define CFG_EXTRA_ENV_SETTINGS \
++	"kernel_addr_r=" KERNEL_ADDR_R "\0" \
++	"fdt_addr_r=" FDT_ADDR_R "\0" \
++	"ramdisk_addr_r=" RAMDISK_ADDR_R "\0" \
++	"scriptaddr=" SCRIPT_ADDR_R "\0" \
++	"pxefile_addr_r=" PXEFILE_ADDR_R "\0" \
++	"fdtfile=" CONFIG_DEFAULT_DEVICE_TREE ".dtb\0" \
++	"console=ttyS0,115200\0"
++
++#endif /* _CONFIG_DS212J_H */
+-- 
+2.43.0
+

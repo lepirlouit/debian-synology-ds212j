@@ -1,0 +1,7 @@
+[Unit]
+Description=Save the in-RAM journal to /var/log/journal-saved
+RequiresMountsFor=/var/log
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ds212j-logsave

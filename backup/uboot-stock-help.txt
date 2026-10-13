@@ -1,0 +1,43 @@
+help
+?       - alias for 'help'
+SatR - sample at reset sub-system, relevent for DB only
+base    - print or set address offset
+bootm   - boot application image from memory
+bootp	- boot image via network using BootP/TFTP protocol
+bubt	- Burn an image on the Boot Flash.
+cmp     - memory compare
+cp      - memory copy
+cpumap - Display CPU memory mapping settings.
+crc32   - checksum calculation
+echo    - echo args to console
+erase   - erase FLASH memory
+flinfo  - print FLASH memory information
+go      - start application at address 'addr'
+help    - print online help
+icrc32  - checksum calculation
+iloop   - infinite loop on address range
+imd     - i2c memory display
+imm     - i2c memory modify (auto-incrementing)
+imw     - memory write (fill)
+inm     - memory modify (constant address)
+iprobe  - probe to discover valid I2C chip addresses
+loadb   - load binary file over serial line (kermit mode)
+loads   - load S-Record file over serial line
+loop    - infinite loop on address range
+md      - memory display
+mm      - memory modify (auto-incrementing)
+mtest   - simple RAM test
+mw      - memory write (fill)
+nm      - memory modify (constant address)
+pci     - list and access PCI Configuration Space
+ping	- send ICMP ECHO_REQUEST to network host
+printenv- print environment variables
+protect - enable or disable FLASH write protection
+rarpboot- boot image via network using RARP/TFTP protocol
+reset   - Perform RESET of the CPU
+resetenv	- Return all environment variable to default.
+setenv  - set environment variables
+sflash	- read, write or erase the external SPI Flash.
+tftpboot- boot image via network using TFTP protocol
+version - print monitor version
+Marvell>> 

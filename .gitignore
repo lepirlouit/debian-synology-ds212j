@@ -1,0 +1,11 @@
+# sources and build output (4+ GB): rebuilt by the instructions in README.md
+build/
+# local TFTP root
+tftp/
+# full dump of the stock flash: Synology's copyrighted bootloader/DSM, plus this
+# unit's MAC address and serial number in the vendor sector
+backup/flash_stock.bin
+# raw serial captures (contain the unit's MAC address and LAN addresses)
+logs/
+__pycache__/
+*.pyc

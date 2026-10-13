@@ -1,0 +1,13 @@
+[Unit]
+Description=DS-212j fan control from disk temperatures (DSM fan modes)
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/sbin/ds212j-fan
+Restart=always
+RestartSec=10
+# if the controller dies, leave the fan at full speed
+ExecStopPost=/bin/sh -c 'for n in /sys/class/hwmon/hwmon*/name; do [ "$(cat $n)" = gpio_fan ] && echo 255 > ${n%%/name}/pwm1; done; true'
+
+[Install]
+WantedBy=multi-user.target

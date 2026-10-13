@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+if [ "$1" = remove ]; then
+	systemctl disable --now ds212j-logsave.timer >/dev/null 2>&1 || true
+	systemctl stop ds212j-logsave-shutdown.service >/dev/null 2>&1 || true   # saves the journal
+	systemctl disable ds212j-logsave-shutdown.service >/dev/null 2>&1 || true
+	systemctl disable --now ds212j-fan.service >/dev/null 2>&1 || true
+	systemctl disable --now ds212j-leds.timer >/dev/null 2>&1 || true
+	systemctl disable ds212j-power-led.service >/dev/null 2>&1 || true
+	sed -i '\|^PROGRAM /usr/sbin/ds212j-leds$|d' /etc/mdadm/mdadm.conf 2>/dev/null || true
+	systemctl try-restart mdmonitor.service >/dev/null 2>&1 || true
+fi

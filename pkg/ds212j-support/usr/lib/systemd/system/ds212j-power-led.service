@@ -1,0 +1,19 @@
+[Unit]
+Description=DS-212j power LED and boot beep, like DSM
+# From power-on the microcontroller blinks the power LED by itself. When the
+# system is up: steady LED, one beep, STATUS LED set from the RAID state.
+# While shutting down: blinking power LED again.
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ds212j-microp power-led on
+ExecStart=/usr/sbin/ds212j-microp beep
+ExecStart=/usr/sbin/ds212j-leds
+# Stopped early during shutdown/reboot (it was started last)
+ExecStop=/usr/sbin/ds212j-microp power-led blink
+
+[Install]
+WantedBy=default.target

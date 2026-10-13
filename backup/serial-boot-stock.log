@@ -1,0 +1,114 @@
+[  574.400000] init: synonetd main process (2125) killed by TERM signal
+[  574.470000] init: synostoraged main process (3920) terminated with status 15
+[  574.600000] init: hotplugd main process (4242) killed by TERM signal
+[  574.660000] init: ip-conflict-detect main process (4799) killed by TERM signal
+[  574.780000] init: nmbd main process (7321) killed by TERM signal
+System is going to poweroff.
+[  586.540000] init: Disconnected from D-Bus system bus
+[  587.300000] init: synoscheduler-vmtouch main process (851) killed by TERM signal
+[  587.710000] init: pgsql pre-stop process (7891) terminated with status 2
+[  592.770000] init: skip respawn syslog-ng during shutdown
+[  594.200000] md: md2: set sda5 to auto_remap [0]
+[  594.200000] md: md2: set sdb5 to auto_remap [0]
+[  594.210000] md: md2 stopped.
+[  594.210000] md: unbind<sda5>
+[  594.210000] md: export_rdev(sda5)
+[  594.220000] md: unbind<sdb5>
+[  594.220000] md: export_rdev(sdb5)
+[  594.220000] md2: detected capacity change from 1995451858944 to 0
+[  596.790000] md: md0 in immediate safe mode
+[  596.790000] md: md1 in immediate safe mode
+[  596.800000] init: dhcp-client (eth0) main process (3244) killed by KILL signal
+[  596.810000] init: tty main process (4421) killed by KILL signal
+[  596.820000] init: skip respawn tty during shutdown
+[  596.960000] md: md1: set sda2 to auto_remap [0]
+[  596.960000] md: md1: set sdb2 to auto_remap [0]
+[  596.970000] md: md1 stopped.
+[  596.970000] md: unbind<sda2>
+[  596.970000] md: export_rdev(sda2)
+[  596.980000] md: unbind<sdb2>
+[  596.980000] md: export_rdev(sdb2)
+[  596.980000] md1: detected capacity change from 2147418112 to 0
+[  597.530000] md: stopping all md devices.
+[  597.540000] md: md0 switched to read-only mode.
+[  598.540000] sd 1:0:0:0: [sdb] Synchronizing SCSI cache
+[  598.570000] sd 1:0:0:0: [sdb] Stopping disk
+[  599.050000] sd 0:0:0:0: [sda] Synchronizing SCSI cache
+[  599.070000] sd 0:0:0:0: [sda] Stopping disk
+[  599.550000] Power down.
+[  599.570000] ata2: exception Emask 0x10 SAct 0x0 SErr 0x180000 action 0x6 frozen
+[  599.570000] ata2: edma_err_cause=00000020 pp_flags=00þ
+         __  __                      _ _
+        |  \/  | __ _ _ ____   _____| | |
+        | |\/| |/ _` | '__\ \ / / _ \ | |
+        | |  | | (_| | |   \ V /  __/ | |
+        |_|  |_|\__,_|_|    \_/ \___|_|_|
+ _   _     ____              _
+| | | |   | __ )  ___   ___ | |_ 
+| | | |___|  _ \ / _ \ / _ \| __| 
+| |_| |___| |_) | (_) | (_) | |_ 
+ \___/    |____/ \___/ \___/ \__|  ** LOADER **
+ ** MARVELL BOARD: Synology Disk Station LE 
+
+U-Boot 1.1.4 (Mar 15 2012 - 15:43:19) Marvell version: 3.4.4
+
+U-Boot code: 00600000 -> 0067FFF0  BSS: -> 0068B43C
+
+Soc: 88F6281 A1 (DDR2)
+CPU running @ 1200Mhz L2 running @ 480Mhz
+SysClock = 400Mhz , TClock = 200Mhz 
+
+DRAM CAS Latency = 6 tRP = 6 tRAS = 18 tRCD=6
+DRAM CS[0] base 0x00000000   size 128MB 
+DRAM CS[1] base 0x08000000   size 128MB 
+DRAM Total size 256MB  16bit width
+[4096kB@f8000000] Flash:  4 MB
+Addresses 8M - 0M are saved for the U-Boot usage.
+Mem malloc Initialization (8M - 7M): Done
+Using default environment
+
+
+CPU : Marvell Feroceon (Rev 1)
+
+Streaming disabled 
+Write allocate disabled
+
+Module 1 is AUDIO
+
+USB 0: host mode
+PEX 0: interface detected no Link.
+
+Synology Model: DS212jr1
+Fan Status: Not Good
+Fan 1: Not Good
+
+Net:   egiga0 [PRIME], egiga1
+Hit any key to stop autoboot:  3  0
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  <INTERRUPT>
+Marvell>>  
+Unknown command '<NULL>' - try 'help'
+Marvell>> 

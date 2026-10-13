@@ -1,0 +1,16 @@
+# copyparty on the DS-212j — see https://github.com/9001/copyparty#server-config
+# After editing: sudo systemctl reload copyparty
+[global]
+  p: 3923                         # http://ds212j:3923/
+  name: ds212j
+  e2dsa                           # index all files: search, dedup, upload resume
+  hist: /var/lib/copyparty/hist   # index and thumbnails, outside the shared folder
+  no-robots
+
+[accounts]
+  lepirlouit: @PASSWORD@
+
+[/]
+  /srv/files
+  accs:
+    rwmda: lepirlouit             # read, write, move, delete, admin; nobody else

@@ -1,0 +1,47 @@
+ata: sata_mv: optional "presence + activity" LED mode for SoC controllers
+
+Add a "marvell,led-act-presence" DT property that sets
+SOC_LED_CTRL_ACT_PRESENCE: the activity LED outputs then stay lit while a
+drive is attached and blink on activity. This is what Synology DSM does on
+the DS-212j (SATAHC_LED_ACT_PRESENT in its GPL kernel).
+
+--- a/drivers/ata/sata_mv.c
++++ b/drivers/ata/sata_mv.c
+@@ -426,6 +426,7 @@
+ 	MV_HP_FLAG_SOC		= (1 << 11),	/* SystemOnChip, no PCI */
+ 	MV_HP_QUIRK_LED_BLINK_EN = (1 << 12),	/* is led blinking enabled? */
+ 	MV_HP_FIX_LP_PHY_CTL	= (1 << 13),	/* fix speed in LP_PHY_CTL ? */
++	MV_HP_LED_ACT_PRESENCE	= (1 << 14),	/* LEDs: on = present, blink = act */
+ 
+ 	/* Port private flags (pp_flags) */
+ 	MV_PP_FLAG_EDMA_EN	= (1 << 0),	/* is EDMA engine enabled? */
+@@ -3387,7 +3388,17 @@
+ static void mv_soc_enable_leds(struct mv_host_priv *hpriv,
+ 				      void __iomem *mmio)
+ {
+-	return;
++	void __iomem *hc_mmio = mv_hc_base(mmio, 0);
++
++	/*
++	 * By default the activity LED outputs only light up during I/O.
++	 * Boards whose per-disk LEDs are meant to stay lit while a drive is
++	 * present (e.g. Synology DS-212j) can ask for the multiplexed
++	 * "presence + activity" mode instead.
++	 */
++	if (hpriv->hp_flags & MV_HP_LED_ACT_PRESENCE)
++		writel(readl(hc_mmio + SOC_LED_CTRL) | SOC_LED_CTRL_ACT_PRESENCE,
++		       hc_mmio + SOC_LED_CTRL);
+ }
+ 
+ static void mv_soc_read_preamp(struct mv_host_priv *hpriv, int idx,
+@@ -4147,6 +4158,10 @@
+ 					"marvell,armada-370-sata"))
+ 		hpriv->hp_flags |= MV_HP_FIX_LP_PHY_CTL;
+ 
++	if (pdev->dev.of_node &&
++	    of_property_read_bool(pdev->dev.of_node, "marvell,led-act-presence"))
++		hpriv->hp_flags |= MV_HP_LED_ACT_PRESENCE;
++
+ 	/* initialize adapter */
+ 	rc = mv_init_host(host);
+ 	if (rc)

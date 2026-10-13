@@ -1,0 +1,14 @@
+[Unit]
+Description=Save the in-RAM journal to disk at shutdown
+# stopped before /var/log is unmounted and while journald is still running
+RequiresMountsFor=/var/log
+After=systemd-journald.service local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/sbin/ds212j-logsave
+
+[Install]
+WantedBy=multi-user.target

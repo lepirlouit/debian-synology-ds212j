@@ -1,0 +1,5 @@
+# Synology DS-212j disk hibernation (like DSM: Control Panel > Hardware & Power >
+# HDD Hibernation). Minutes of inactivity before the internal disks spin down,
+# 0 = never. Valid: 1..20, or a multiple of 30 up to 330 (hdparm -S limits).
+# Applied when the disks appear (boot) and by: sudo udevadm trigger -c change -s block
+SPINDOWN_MINUTES=10

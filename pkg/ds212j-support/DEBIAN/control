@@ -1,0 +1,20 @@
+Package: ds212j-support
+Version: 1.6
+Architecture: all
+Maintainer: lepirlouit <bdb@aloalto.com>
+Depends: mdadm, systemd, util-linux, smartmontools, hdparm, python3
+Section: admin
+Priority: optional
+Description: Synology DS-212j board support (LEDs, buzzer) for Debian
+ Reproduces the DSM LED and buzzer behaviour on a Synology DS-212j running
+ Debian with a mainline kernel:
+  - power LED blinking while booting/shutting down, steady when up, and one
+    beep when boot has finished (microcontroller on UART1);
+  - STATUS LED green when all md arrays are healthy, blinking orange when one
+    is degraded or missing;
+  - amber HDD LEDs on when a disk is faulty in an md array or fails SMART;
+  - DSM fan modes (full, cool, quiet, low-power) driven by the hottest disk
+    temperature, including the 61 C emergency shutdown;
+  - DSM disk hibernation: spin-down delay (10 min by default), journal kept
+    in RAM and saved to disk daily and at shutdown, and while the disks sleep
+    only the power LED stays lit and the fan stops.

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Synology DS-212j microcontroller on UART1 (9600 8N1): power LED, status LED, buzzer.
+# Codes tested on the hardware ("4"/"6" also in Synology's GPL synobios):
+#   power-led on|blink|off            -> "4" | "5" | "6"
+#   status-led off                    -> "7"
+#   status-led green|green-blink      -> "8" | "9"
+#   status-led orange|orange-blink    -> ":" | ";"
+#   beep                              -> "3"  (the beep DSM gives when boot has finished)
+#   beep-short                        -> "2"
+# ("1" = power off is sent by the kernel's Synology power-off driver.)
+# Commands can be sent back to back; callers are serialized with a lock so that
+# two scripts never interleave on the UART.
+set -eu
+TTY=/dev/ttyS1
+LOCK=/run/ds212j-microp.lock
+
+case "${1:-} ${2:-}" in
+	"power-led on")            cmd=4 ;;
+	"power-led blink")         cmd=5 ;;
+	"power-led off")           cmd=6 ;;
+	"status-led off")          cmd=7 ;;
+	"status-led green")        cmd=8 ;;
+	"status-led green-blink")  cmd=9 ;;
+	"status-led orange")       cmd=: ;;
+	"status-led orange-blink") cmd=';' ;;
+	"beep ")                   cmd=3 ;;
+	"beep-short ")             cmd=2 ;;
+	*)
+		echo "usage: $0 power-led on|blink|off" >&2
+		echo "       $0 status-led off|green|green-blink|orange|orange-blink" >&2
+		echo "       $0 beep | beep-short" >&2
+		exit 2 ;;
+esac
+
+exec 9>"$LOCK"
+flock 9
+stty -F "$TTY" 9600 raw -echo cs8 -cstopb -parenb
+printf '%s' "$cmd" > "$TTY"

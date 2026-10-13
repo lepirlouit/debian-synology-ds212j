@@ -1,0 +1,8 @@
+# Fan mode for the Synology DS-212j, same choices as in DSM
+# (Control Panel > Hardware & Power > Fan Speed Mode):
+#   full       Full-speed mode: always at full speed
+#   cool       Cool mode:       faster, cooler, louder
+#   quiet      Quiet mode:      slower, quieter, warmer
+#   low-power  Low-power mode:  like quiet, and the fan stops while the disks are cold
+# After changing it: sudo systemctl restart ds212j-fan
+MODE=low-power

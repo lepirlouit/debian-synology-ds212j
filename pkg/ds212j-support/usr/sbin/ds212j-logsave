@@ -1,0 +1,11 @@
+#!/bin/sh
+# Append the new entries of the (in-RAM) journal to /var/log/journal-saved/YYYY-MM.log.
+# Run once a day and at shutdown, so the disks are not woken up for every log line.
+# The cursor lives in /run: the journal starts empty at every boot anyway.
+set -eu
+dir=/var/log/journal-saved
+mkdir -p "$dir"
+journalctl --no-pager -q -o short-iso --cursor-file=/run/ds212j-logsave.cursor \
+	>> "$dir/$(date +%Y-%m).log"
+# keep one year
+find "$dir" -name '*.log' -mtime +400 -delete

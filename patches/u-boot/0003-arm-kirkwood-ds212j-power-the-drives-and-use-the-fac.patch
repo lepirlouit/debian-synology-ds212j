@@ -1,0 +1,118 @@
+From 110ba724e977c089ecd22e91424f0c0ff5b90c79 Mon Sep 17 00:00:00 2001
+From: lepirlouit <bdb@aloalto.com>
+Date: Tue, 13 Oct 2026 15:37:58 +0200
+Subject: [PATCH 3/3] arm: kirkwood: ds212j: power the drives and use the
+ factory MAC
+
+- GPIO 29/31 switch HDD1/HDD2 power (as in Synology's GPL kernel,
+  KW_6281_212j_GPIO_init). Power HDD1 at early init and HDD2 3 s later,
+  like DSM does, so U-Boot and Linux can see the disks.
+- Read the MAC address from the 'vendor' sector of the SPI flash
+  (0x3C0000: 6 bytes + checksum) when ethaddr is not set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ board/Synology/ds212j/ds212j.c | 56 ++++++++++++++++++++++++++++++++--
+ configs/ds212j_defconfig       |  1 +
+ 2 files changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/board/Synology/ds212j/ds212j.c b/board/Synology/ds212j/ds212j.c
+index e6c3d402..238820e2 100644
+--- a/board/Synology/ds212j/ds212j.c
++++ b/board/Synology/ds212j/ds212j.c
+@@ -6,7 +6,11 @@
+  */
+ 
+ #include <config.h>
++#include <env.h>
+ #include <init.h>
++#include <net.h>
++#include <spi_flash.h>
++#include <linux/delay.h>
+ #include <asm/global_data.h>
+ #include <asm/io.h>
+ #include <asm/arch/cpu.h>
+@@ -17,14 +21,22 @@ DECLARE_GLOBAL_DATA_PTR;
+ 
+ /* GPIO 20..23: HDD LEDs (active low) -> outputs, high = off */
+ #define DS212J_HDD_LEDS		(0xf << 20)
++/*
++ * GPIO 29 / 31: HDD1 / HDD2 power switch (active high, off at reset).
++ * Like DSM, spin the drives up one at a time, 3 s apart.
++ */
++#define DS212J_HDD1_POWER	BIT(29)
++#define DS212J_HDD2_POWER	BIT(31)
++#define DS212J_HDD_POWER	(DS212J_HDD1_POWER | DS212J_HDD2_POWER)
+ /* GPIO 32..34: fan speed select (bits 0..2 of the high bank), 35: fan alarm */
+ #define DS212J_FAN_MASK		0x7
+ #define DS212J_FAN_DEFAULT	0x3	/* ~3800 rpm until Linux takes over */
+ 
+ int board_early_init_f(void)
+ {
+-	mvebu_config_gpio(DS212J_HDD_LEDS, DS212J_FAN_DEFAULT,
+-			  ~DS212J_HDD_LEDS, ~DS212J_FAN_MASK);
++	/* LEDs off, HDD1 powered now, HDD2 later in board_late_init() */
++	mvebu_config_gpio(DS212J_HDD_LEDS | DS212J_HDD1_POWER, DS212J_FAN_DEFAULT,
++			  ~(DS212J_HDD_LEDS | DS212J_HDD_POWER), ~DS212J_FAN_MASK);
+ 
+ 	static const u32 kwmpp_config[] = {
+ 		MPP0_SPI_SCn,		/* SPI flash */
+@@ -90,3 +102,43 @@ int board_init(void)
+ 
+ 	return 0;
+ }
++
++/*
++ * Synology keeps the factory MAC address in the "vendor" sector of the SPI
++ * flash: 6 bytes of MAC followed by a checksum byte (sum of the 6 bytes).
++ */
++#define DS212J_VENDOR_OFFSET	0x3c0000
++
++static void ds212j_hdd2_power_on(void)
++{
++	struct kwgpio_registers *gpio0 = (void *)MVEBU_GPIO0_BASE;
++
++	mdelay(3000);
++	setbits_le32(&gpio0->dout, DS212J_HDD2_POWER);
++}
++
++int board_late_init(void)
++{
++	struct udevice *flash;
++	u8 buf[7], sum = 0;
++	int i;
++
++	ds212j_hdd2_power_on();
++
++	if (env_get("ethaddr"))
++		return 0;
++
++	if (spi_flash_probe_bus_cs(0, 0, &flash) ||
++	    spi_flash_read_dm(flash, DS212J_VENDOR_OFFSET, sizeof(buf), buf))
++		return 0;
++
++	for (i = 0; i < 6; i++)
++		sum += buf[i];
++
++	if (sum == buf[6] && is_valid_ethaddr(buf))
++		eth_env_set_enetaddr("ethaddr", buf);
++	else
++		printf("vendor sector: no valid MAC address\n");
++
++	return 0;
++}
+diff --git a/configs/ds212j_defconfig b/configs/ds212j_defconfig
+index c4a92886..52ce70aa 100644
+--- a/configs/ds212j_defconfig
++++ b/configs/ds212j_defconfig
+@@ -21,6 +21,7 @@ CONFIG_LTO=y
+ CONFIG_BOOTSTD_FULL=y
+ CONFIG_BOOTDELAY=3
+ CONFIG_USE_PREBOOT=y
++CONFIG_BOARD_LATE_INIT=y
+ CONFIG_SYS_PBSIZE=1050
+ CONFIG_SYS_PROMPT="DS212j> "
+ CONFIG_SYS_MAXARGS=32
+-- 
+2.43.0
+

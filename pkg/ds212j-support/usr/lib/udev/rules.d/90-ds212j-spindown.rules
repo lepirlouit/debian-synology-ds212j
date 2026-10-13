@@ -1,0 +1,2 @@
+# DS-212j: disk hibernation delay for the two internal SATA disks
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", KERNEL=="sd[a-z]", RUN+="/usr/sbin/ds212j-spindown /dev/%k"

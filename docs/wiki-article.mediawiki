@@ -1,0 +1,813 @@
+A 2012 Synology DS-212j is still a perfectly usable little box: a Marvell Kirkwood 88F6281 at 1.2 GHz, 256 MB of DDR2, two SATA bays, USB 2.0 and gigabit Ethernet. Synology stopped updating DSM for it long ago, and DSM 6.2 runs a 2.6.32 kernel. This write-up replaces DSM with Debian running a current upstream Linux kernel, and eventually swaps the 2012 vendor U-Boot for a modern mainline U-Boot.
+
+<blockquote>'''Status:''' done. Mainline U-Boot v2026.07 is in SPI flash, and Debian 13 with Linux 7.2.10 boots from a RAID1 mirror on the two internal disks. Every step below was actually carried out on the hardware.
+</blockquote>
+''The patches, scripts and config files mentioned below (<code>patches/</code>, <code>tools/</code>, <code>config/</code>, <code>pkg/</code>, <code>backup/</code>, <code>logs/</code>) are in the project directory of this build; paths are given relative to it.''
+
+<span id="credits-and-prior-work"></span>
+== Credits and prior work ==
+
+This project stands on two earlier write-ups:
+
+* '''tangrs, [https://blog.tangrs.id.au/2021/11/19/running-debian-on-a-synology-ds212j/ &quot;Running Debian on a Synology DS212J&quot;] (19 November 2021)'''. It explains how DSM boots, why a Debian root under DSM's 2.6.32 kernel fails (<code>FATAL: kernel too old</code>), and how to boot Debian's <code>linux-image-marvell</code> from the stock U-Boot over TFTP with an appended DTB. Above all, it found the two most important board quirks: '''GPIO 29/31 power the drives''', and '''GPIO 35 is the fan tachometer, not an alarm''', so the upstream DT makes <code>systemd-udevd</code> spin. The DT changes from that post are in [https://gist.github.com/tangrs/c3e6bd13b849d5a5bcf9d338550427fe this gist]. Synology's GPL source, which both of us used, is on [https://sourceforge.net/projects/dsgpl/files/Synology%20NAS%20GPL%20Source/ SourceForge] and on Synology's own download site.
+* '''The Debian wiki, [https://wiki.debian.org/InstallingDebianOn/Synology InstallingDebianOn/Synology]'''. It covers the DS218j (Armada 385, a different SoC), but its general notes apply here: the 3.3 V serial header (pins 2 = GND, 4 = TX, 6 = RX on the board; checked on the DS218j, not re-checked on this board), Ctrl-C to stop U-Boot, the appended-DTB <code>uImage</code> trick for old vendor U-Boots, and <code>make bindeb-pkg</code> for the kernel.
+
+Where this guide goes further: a mainline U-Boot in flash (so no TFTP or serial is needed to boot), a fixed upstream DT (RAM size, SATA pinctrl, LEDs), the <code>sata_mv</code> LED patch, RAID1 root without an initramfs, Debian kernel packages, and the DSM LED/beep behaviour. The [[#appendix--the-device-tree-changes-explained|appendix]] says, for each DT change, where the information came from. A [[#coverage-compared-with-the-earlier-write-ups|coverage table]] at the end compares this guide with both sources.
+
+<span id="what-you-need"></span>
+== What you need ==
+
+* The DS-212j. This guide wipes the disks, so back up anything you care about first.
+* A 3.3 V USB-to-serial adapter connected to the board's console header (115200 8N1). Here it shows up as <code>/dev/ttyUSB0</code>.
+* A Linux PC (Ubuntu/Debian-based here).
+* One or two USB sticks.
+* No network is required. Everything in this guide goes over the serial line and USB.
+
+<span id="hardware-facts-gathered-from-the-stock-boot"></span>
+== Hardware facts gathered from the stock boot ==
+
+<pre>U-Boot 1.1.4 (Mar 15 2012 - 15:43:19) Marvell version: 3.4.4
+Soc: 88F6281 A1 (DDR2)
+CPU running @ 1200Mhz L2 running @ 480Mhz
+SysClock = 400Mhz , TClock = 200Mhz
+DRAM CS[0] base 0x00000000   size 128MB
+DRAM CS[1] base 0x08000000   size 128MB
+DRAM Total size 256MB  16bit width
+[4096kB@f8000000] Flash:  4 MB
+Synology Model: DS212jr1</pre>
+The stock environment boots with <code>bootm F8080000 F8280000</code>, which runs the kernel and ramdisk straight out of the memory-mapped SPI flash. The stock U-Boot has '''no USB, SATA or FAT support''', so it can only boot from SPI flash, TFTP or the serial line (<code>loadb</code>). This is the main reason to replace it later.
+
+The 4 MB SPI flash layout, as seen by DSM:
+
+{| class="wikitable"
+|-
+! Offset
+! Size
+! Content
+|-
+| 0x000000
+| 0x80000
+| U-Boot (kwbimage, SPI boot)
+|-
+| 0x080000
+| 0x200000
+| DSM kernel (uImage)
+|-
+| 0x280000
+| 0x140000
+| DSM ramdisk
+|-
+| 0x3C0000
+| 0x10000
+| vendor (MAC address, serial)
+|-
+| 0x3D0000
+| 0x20000
+| &quot;RedBoot config&quot; (all zeros here, reused for the new U-Boot env)
+|-
+| 0x3F0000
+| 0x10000
+| FIS directory
+|}
+
+<span id="step-1--get-to-the-u-boot-prompt"></span>
+== Step 1 – Get to the U-Boot prompt ==
+
+Connect the serial adapter, open the console at 115200 baud, power the NAS on, and press any key when you see <code>Hit any key to stop autoboot</code>. You land at the <code>Marvell&gt;&gt;</code> prompt.
+
+To catch the prompt reliably from a script, I used <code>tools/catch_uboot.py</code>, which logs the console and spams Ctrl-C once the countdown starts.
+
+<span id="step-2--back-up-the-whole-spi-flash-over-serial-only"></span>
+== Step 2 – Back up the whole SPI flash (over serial only) ==
+
+The stock U-Boot can't write to USB, but the flash is memory-mapped at <code>0xF8000000</code>, so we can simply <code>md</code> it and parse the hex dump on the PC. To be sure no byte is corrupted on the serial line, every 64 KB chunk is checked against U-Boot's own <code>crc32</code> command and re-read if it doesn't match:
+
+<pre>python3 tools/dump_flash.py backup/flash_stock.bin</pre>
+This takes about 25 minutes at 115200 baud (no chunk needed a retry here). Keep <code>backup/flash_stock.bin</code> safe: it is your way back to DSM, and the <code>vendor</code> area at <code>0x3C0000</code> holds the board's real MAC address (<code>00:11:32:…</code>) and serial number. The DSM kernel stored at <code>0x80000</code> turns out to be Linux 2.6.32.12.
+
+<span id="extracting-the-ddr2-settings-from-the-stock-bootloader"></span>
+=== Extracting the DDR2 settings from the stock bootloader ===
+
+The first 512 bytes of the flash are the Kirkwood boot ROM header (<code>0x5a</code> = SPI boot, load to <code>0x600000</code>, entry point <code>0x670000</code>). Its extension header contains the register writes the boot ROM performs to initialise the DDR2 controller '''before''' U-Boot runs. A new U-Boot needs exactly these values, and they are saved in <code>backup/ddr_regs.txt</code>:
+
+<pre>DATA 0xFFD01400 0x43000C30   # SDRAM config
+DATA 0xFFD01404 0x39743000   # DDR controller control (low)
+...
+DATA 0xFFD01504 0x07FFFFF1   # CS0: 128 MB, enabled
+DATA 0xFFD0150C 0x07FFFFF5   # CS1: 128 MB, enabled
+...</pre>
+<span id="pin-multiplexing"></span>
+=== Pin multiplexing ===
+
+The stock MPP (pin function) and GPIO registers can be read directly from the stock U-Boot prompt. They are saved in <code>backup/stock-mpp-gpio-regs.txt</code>:
+
+<pre>Marvell&gt;&gt; md.l f1010000 7
+f1010000: 01002222 03303311 00550000 00000000
+f1010010: 44440000 00044444 00000000</pre>
+Decoded: MPP0-3 are SPI, MPP6 is SYSRST_OUTn, MPP8/9 are I²C (for the S-35390A RTC), MPP10/11 are UART0 (the console), and MPP13/14 are UART1 (the power/LED microcontroller). Everything else is GPIO. The audio functions on MPP36-44 are leftovers from Marvell's reference design; the DS-212j has no audio.
+
+<span id="step-3--build-tools-host"></span>
+== Step 3 – Build tools (host) ==
+
+<pre>sudo apt install bison flex libssl-dev libgnutls28-dev uuid-dev bc gcc-arm-linux-gnueabi \
+    mmdebstrap qemu-user-static binfmt-support arch-test debian-archive-keyring</pre>
+Ubuntu's <code>gcc-arm-linux-gnueabi</code> targets <code>armv5t</code> with soft-float, which is exactly what the Kirkwood (ARMv5TE) and Debian's <code>armel</code> port need.
+
+<span id="step-4--a-mainline-u-boot-for-the-ds-212j"></span>
+== Step 4 – A mainline U-Boot for the DS-212j ==
+
+Mainline U-Boot (v2026.07) still supports Kirkwood and has a Synology DS109 board, but nothing for the DS-212j. The port in <code>patches/u-boot/</code> (<code>patches/u-boot/0001-arm-kirkwood-add-Synology-DS-212j-board.patch</code>) adds a <code>ds212j</code> target:
+
+* <code>kwbimage.cfg</code> contains the DDR2 register list copied '''verbatim''' from the stock bootloader header (step 2). This is the only part that can't be guessed.
+* The pin setup matches the stock registers, and the HDD LEDs and fan GPIOs are initialised.
+* It uses the upstream <code>kirkwood-ds212j</code> device tree, which U-Boot shares with Linux.
+* It enables USB storage, SATA (<code>sata_mv</code>) for both bays, ext4/FAT, and '''bootstd''', so it finds <code>/boot/extlinux/extlinux.conf</code> on USB or SATA by itself.
+* The environment is stored in SPI flash at <code>0x3D0000</code>, which was unused on this unit, and the <code>vendor</code> sector is left alone.
+
+<pre>git clone --depth 1 -b v2026.07 https://source.denx.de/u-boot/u-boot.git
+cd u-boot &amp;&amp; git am ../patches/u-boot/*.patch
+make CROSS_COMPILE=arm-linux-gnueabi- O=../uboot-out ds212j_defconfig
+make CROSS_COMPILE=arm-linux-gnueabi- O=../uboot-out -j8
+# -&gt; ../uboot-out/u-boot.kwb (≈ 320 KiB, fits in the 512 KiB bootloader slot)</pre>
+(On Ubuntu, the host <code>kwboot</code> tool links against <code>-ltinfo</code>. Install <code>libncurses-dev</code>, or point <code>HOSTLDFLAGS=-L…</code> to a directory with a <code>libtinfo.so</code> symlink.)
+
+<span id="step-5--linux-72-for-the-ds-212j"></span>
+== Step 5 – Linux 7.2 for the DS-212j ==
+
+The upstream <code>kirkwood-ds212j.dts</code> has several bugs: wrong RAM size, a SATA pin conflict, drives left unpowered, dark disk LEDs, and a fan interrupt storm. The DT patch (<code>patches/linux</code>) fixes them. Each change, and how I found it, is explained in the [[#appendix--the-device-tree-changes-explained|appendix]]. The kernel is built from <code>mvebu_v5_defconfig</code> plus a config fragment (<code>config/linux-ds212j.config</code>) that adds what systemd/Debian need (cgroups, seccomp, autofs, IPv6…), MD RAID1, the board drivers (gpio-fan, LEDs, S-35390A RTC, Synology power-off via UART1) and appended-DTB support so the stock U-Boot can boot it too.
+
+<pre>tar xf linux-7.2.10.tar.xz &amp;&amp; cd linux-7.2.10
+for p in ../patches/linux/*.patch; do patch -p1 &lt; $p; done
+export ARCH=arm CROSS_COMPILE=arm-linux-gnueabi-
+make O=../linux-out mvebu_v5_defconfig
+scripts/kconfig/merge_config.sh -m -O ../linux-out ../linux-out/.config ../config/linux-ds212j.config
+make O=../linux-out olddefconfig
+make O=../linux-out -j8 zImage modules dtbs        # ~7 min on an 8-thread laptop</pre>
+<span id="step-6--a-debian-13-trixie-armel-root-filesystem-built-without-root"></span>
+== Step 6 – A Debian 13 (trixie) armel root filesystem, built without root ==
+
+Trixie is the last Debian release with <code>armel</code>. Its userland is fine, but it no longer ships a Kirkwood kernel, which is why we built one. <code>mmdebstrap</code> in <code>unshare</code> mode builds the rootfs as a normal user, running the armel binaries through qemu-user:
+
+<pre>mmdebstrap --mode=unshare --arch=armel --variant=minbase \
+  --include=systemd-sysv,udev,openssh-server,sudo,mdadm,u-boot-tools,… \
+  trixie debian-trixie-armel.tar http://deb.debian.org/debian</pre>
+<code>tools/make-usb-image.sh</code> then turns it into a bootable disk image, still without root. Inside a user namespace (<code>unshare --map-auto --map-root-user</code>), it extracts the tarball with correct ownership, installs the kernel, DTB and modules, writes <code>extlinux.conf</code>, <code>fstab</code>, the hostname and DHCP config, sets a root password, and runs <code>mkfs.ext4 -d</code> on the result. A tiny Python snippet writes the MBR, so <code>sfdisk</code> isn't needed either.
+
+<pre>tools/make-usb-image.sh debian-trixie-armel.tar linux-out ds212j-usb.img 2500M
+sudo dd if=ds212j-usb.img of=/dev/sdX bs=4M conv=fsync status=progress</pre>
+<span id="step-7--test-the-new-u-boot-from-ram-with-kwboot-nothing-is-flashed"></span>
+== Step 7 – Test the new U-Boot from RAM with <code>kwboot</code> (nothing is flashed) ==
+
+The Kirkwood boot ROM can load a bootloader over the UART. <code>kwboot</code> (built along with U-Boot) keeps sending the boot pattern while the board resets, and the ROM then takes the image over XMODEM instead of reading SPI flash. There's no need to touch the power button. Type <code>reset</code> at the stock prompt (or <code>reboot</code> in Linux), and start kwboot right away:
+
+<pre>uboot-out/tools/kwboot -b uboot-out/u-boot.kwb -B 115200 /dev/ttyUSB0</pre>
+<code>tools/kwboot_test.py</code> automates the reset, the upload and the console log. The upload takes about 35 s. On the first try:
+
+<pre>U-Boot 2026.07 (Oct 13 2026 - 14:32:39 +0200)
+Synology DS-212j
+SoC:   Kirkwood 88F6281_A1
+Model: Synology DS212j v10, v20
+DRAM:  256 MiB
+...
+** Booting bootflow 'usb_mass_storage.lun0.bootdev.part_1' with extlinux
+Starting kernel ...
+Linux version 7.2.10-ds212j ...
+Welcome to Debian GNU/Linux 13 (trixie)!
+ds212j login:</pre>
+<span id="step-8--three-bugs-on-the-way-to-working-disks"></span>
+== Step 8 – Three bugs on the way to working disks ==
+
+The first boot came up without disks. Fixing that turned up three separate problems.
+
+'''1. Upstream DT pin conflict.''' <code>kirkwood-synology.dtsi</code> gives the SATA controller the <code>sata0</code>/<code>sata1</code> pin groups, which include MPP20-23 for the activity LEDs. But <code>kirkwood-ds212j.dts</code> also uses MPP20-23 as GPIO HDD LEDs, so pinctrl refused the SATA pins and <code>sata_mv</code> never probed:
+
+<pre>kirkwood-pinctrl: pin PIN21 already requested by gpio-leds-hdd-21-2; cannot claim for f1080000.sata</pre>
+The stock MPP registers show MPP20-23 set to GPIO, so the fix is to drop the SATA node's <code>pinctrl-0</code> on this board.
+
+'''2. The drives are not powered.''' Once <code>sata_mv</code> probed, both links stayed down (<code>SStatus 0</code>). On the DS-212j, each drive's 5 V/12 V is switched by a GPIO that is off at reset. Under DSM, Synology's kernel switches it on. Driving the candidate lines from Linux with <code>gpioset</code> found them (<code>gpioset -c 0 -z 29=1</code>, and disk 1 appeared):
+
+{| class="wikitable"
+|-
+! GPIO
+! Function
+|-
+| 29
+| HDD1 power (active high)
+|-
+| 31
+| HDD2 power (active high)
+|-
+| 20/21
+| HDD2/HDD1 green LED (active low)
+|-
+| 22/23
+| HDD2/HDD1 amber LED (active low)
+|-
+| 32-34
+| fan speed (3 bits)
+|-
+| 35
+| fan tachometer/alarm input
+|}
+
+Synology's GPL kernel source for DSM 6.2 (<code>arch/arm/mach-feroceon-kw/synology-gpio.c</code>) confirms it. <code>KW_6281_212j_GPIO_init()</code> reuses the DS109 table (<code>hdd2_pm = 31</code>, fan 32-35, fail LEDs 22/23) and adds <code>hdd1_pm = 29</code>, and DSM waits 3 s between drives. The upstream <code>kirkwood-synology.dtsi</code> already has the matching <code>regulators-hdd-29</code> node; the DS-212j DT just never enabled it. The DT patch (<code>patches/linux</code>) does that, and the U-Boot board code powers HDD1 at early init and HDD2 3 s later.
+
+'''3. U-Boot gives up on the drives too early.''' Even when powered, U-Boot printed <code>Failed to identify SATA device</code>, but a manual <code>sata stop; sata init</code> at the prompt a minute later found both drives. Timing it showed that these Seagate ST32000644NS drives need '''~18 s''' after power-on before they answer ATA IDENTIFY, while <code>sata_mv</code> tried only twice, 10 ms apart. The second U-Boot patch (<code>patches/u-boot</code>) keeps asking for up to 30 s once the link is up. Empty ports have no link, so they aren't delayed:
+
+<pre>SATA0: waiting for drive to spin up done
+SATA1: waiting for drive to spin up done</pre>
+U-Boot also reads the factory MAC address from the <code>vendor</code> flash sector (6 bytes plus a checksum byte, the sum of the 6 bytes). Without it, U-Boot made up a random MAC on every boot.
+
+<span id="step-9--flash-the-new-u-boot"></span>
+== Step 9 – Flash the new U-Boot ==
+
+From the RAM-loaded U-Boot, I loaded the image over the serial line with YMODEM (TFTP worked but stalled once, and serial is fast enough for 330 KB), checked its CRC against the file on the PC, and wrote it:
+
+<pre>DS212j&gt; loady 0x1000000                 # PC: sb -k u-boot.kwb &lt;/dev/ttyUSB0 &gt;/dev/ttyUSB0
+DS212j&gt; crc32 0x1000000 ${filesize}     # == crc32 of the file on the PC
+DS212j&gt; sf probe
+DS212j&gt; sf protect unlock 0 0x400000    # Synology leaves the block-protect bits set!
+DS212j&gt; sf update 0x1000000 0 ${filesize}
+DS212j&gt; sf read 0x2000000 0 ${filesize}
+DS212j&gt; cmp.b 0x1000000 0x2000000 ${filesize}
+Total of 329216 byte(s) were the same</pre>
+Without <code>sf protect unlock</code>, <code>sf update</code> fails with <code>ERROR: flash area is locked</code> and writes nothing, which is harmless. Only the first 330 KB of flash change. The <code>vendor</code> sector, the old DSM kernel/ramdisk and the rest stay as they were, and <code>kwboot</code> plus the 4 MB backup can restore everything.
+
+<span id="step-10--install-debian-on-a-raid1-mirror-of-the-two-disks"></span>
+== Step 10 – Install Debian on a RAID1 mirror of the two disks ==
+
+Booted from the USB stick, I partitioned both disks identically (MBR, since the disks are 2 TB):
+
+{| class="wikitable"
+|-
+! Partition
+! Size
+! Type
+! Array
+! Use
+|-
+| sdX1
+| 16 GiB
+| fd
+| md0, '''metadata 0.90'''
+| <code>/</code> (with <code>/boot</code>)
+|-
+| sdX2
+| 2 GiB
+| da
+| md1, metadata 1.2
+| swap
+|-
+| sdX3
+| rest
+| da
+| md2, metadata 1.2 + bitmap
+| <code>/srv</code>
+|}
+
+The 0.90 metadata for the root array is deliberate:
+
+* The superblock sits at the '''end''' of the partition, so each member starts with a plain ext4 filesystem. U-Boot's bootstd reads <code>/boot/extlinux/extlinux.conf</code> straight from <code>sata 0:1</code> (or <code>sata 1:1</code> if the first disk dies) without knowing about RAID.
+* The kernel '''autodetects''' 0.90 arrays on partitions of type <code>fd</code> (<code>CONFIG_MD_AUTODETECT</code>), so <code>root=/dev/md0</code> works '''without an initramfs'''.
+
+The data and swap arrays use modern metadata, and mdadm assembles them in userspace from <code>/etc/mdadm/mdadm.conf</code>. <code>tools/install-to-raid.sh</code> creates the filesystems, copies the running system and writes <code>fstab</code>, <code>mdadm.conf</code> and <code>extlinux.conf</code>.
+
+<pre>md: Autodetecting RAID arrays.
+md: running: &lt;sdb1&gt;&lt;sda1&gt;
+md/raid1:md0: active with 2 out of 2 mirrors
+VFS: Mounted root (ext4 filesystem) on device 9:0.
+Welcome to Debian GNU/Linux 13 (trixie)!</pre>
+U-Boot scans SATA before USB, so the stick is no longer needed.
+
+<span id="result"></span>
+== Result ==
+
+<pre>$ uname -r
+7.2.10-ds212j
+$ findmnt / /srv ; swapon
+/dev/md0  /     ext4
+/dev/md2  /srv  ext4   (1.8T)
+/dev/md1  swap  2G
+$ free -m
+Mem:  239 total, 46 used</pre>
+What works: both SATA disks in RAID1, gigabit Ethernet with the factory MAC, USB, the RTC, the fan (gpio-fan, 3800 rpm at the default speed), the hardware crypto engine (CESA), and the LEDs (disk, power, status) and buzzer behaving as under DSM (step 12). The serial console is at 115200 baud, and SSH works on the LAN.
+
+<span id="step-11--the-kernel-as-a-debian-package"></span>
+== Step 11 – The kernel as a Debian package ==
+
+Copying a <code>zImage</code> by hand works, but <code>apt</code> doesn't know about it. The kernel's own <code>make bindeb-pkg</code> builds a proper <code>linux-image-7.2.10-ds212j</code> package, and Debian's '''u-boot-menu''' package regenerates <code>/boot/extlinux/extlinux.conf</code> from the kernel postinst/postrm hooks whenever a kernel is installed or removed. Each kernel gets an entry plus a &quot;rescue target&quot; entry.
+
+<code>tools/build-kernel-deb.sh</code> does everything: it downloads and verifies the tarball, applies the patches and config fragment, and builds the package.
+
+<pre>sudo apt install debhelper            # bindeb-pkg's debian/rules calls dh_listpackages
+tools/build-kernel-deb.sh 7.2.10 2    # -&gt; build/debs/linux-image-7.2.10-ds212j_7.2.10-2_armel.deb</pre>
+Notes:
+
+* The <code>linux-headers</code> package is skipped (build profile <code>pkg.linux-upstream.nokernelheaders</code>). It would need the armel OpenSSL headers on the build host and is only useful for DKMS.
+* <code>bindeb-pkg</code> installs the DTBs '''flat''' in <code>/usr/lib/linux-image-&lt;version&gt;/</code>, without the <code>marvell/</code> subdirectory.
+
+On the NAS, <code>/etc/default/u-boot</code>:
+
+<pre>U_BOOT_PARAMETERS=&quot;console=ttyS0,115200 rootfstype=ext4 rootwait ro&quot;
+U_BOOT_ROOT=&quot;root=/dev/md0&quot;
+U_BOOT_TIMEOUT=&quot;30&quot;
+U_BOOT_FDT=&quot;kirkwood-ds212j.dtb&quot;</pre>
+Install the kernel '''before''' <code>u-boot-menu</code>. Otherwise its first run finds no <code>/boot/vmlinuz-*</code> and writes an empty menu, and the NAS won't boot:
+
+<pre>sudo apt install ./linux-image-7.2.10-ds212j_7.2.10-2_armel.deb
+sudo apt install u-boot-menu &amp;&amp; sudo u-boot-update</pre>
+Upgrading a kernel is now an ordinary <code>apt install</code> of the new package:
+
+<pre>U-Boot menu
+1:  Debian GNU/Linux 7.2.10-ds212j
+2:  Debian GNU/Linux 7.2.10-ds212j (rescue target)
+Retrieving file: /boot/vmlinuz-7.2.10-ds212j
+Retrieving file: /usr/lib/linux-image-7.2.10-ds212j/kirkwood-ds212j.dtb</pre>
+<span id="step-12--leds-beep-and-fan-like-dsm"></span>
+== Step 12 – LEDs, beep and fan, like DSM ==
+
+<span id="disk-leds"></span>
+=== Disk LEDs ===
+
+Synology's GPL code (<code>synobios/mv6281/ds212j.c</code> and <code>synology-gpio.c</code>) shows how DSM drives them:
+
+* '''Green''' is driven by the SATA controller itself. MPP20/21 are switched to their &quot;SATA activity&quot; function (<code>0x5</code>), and the SATA LED register is set to &quot;presence + activity&quot; (<code>SATAHC_LED_ACT_PRESENT</code>, bit 2 at <code>0x8002C</code>). The LED stays lit while a disk is present and blinks on I/O.
+* '''Orange''' (fault) are plain GPIOs 22/23, active low.
+
+Mainline <code>sata_mv</code> knows the register bit (<code>SOC_LED_CTRL_ACT_PRESENCE</code>) but never sets it. A small patch (<code>patches/linux/0002-ata-sata_mv-optional-presence-activity-LED-mode.patch</code>) adds a <code>marvell,led-act-presence</code> DT property for it. The DT routes MPP20/21 to the SATA controller, and only the orange LEDs remain <code>gpio-leds</code>.
+
+The orange LEDs are lit from userspace by <code>ds212j-leds</code> (see below) when a disk is <code>faulty</code> in an md array or SMART reports it failing.
+
+<span id="power-led-status-led-and-beep"></span>
+=== Power LED, STATUS LED and beep ===
+
+These are handled by the microcontroller on UART1 (<code>/dev/ttyS1</code>, 9600 8N1), which also handles power-off (<code>1</code>, sent by the mainline <code>synology,power-off</code> driver). Synology's GPL code only shows <code>4</code>/<code>6</code>. I tested every code below on this unit by sending it and watching the front panel. Commands can be sent back to back.
+
+{| class="wikitable"
+|-
+! Code
+! Effect
+|-
+| <code>4</code>
+| power LED steady
+|-
+| <code>5</code>
+| power LED blinking
+|-
+| <code>6</code>
+| power LED off
+|-
+| <code>7</code>
+| STATUS LED off
+|-
+| <code>8</code>
+| STATUS LED green
+|-
+| <code>9</code>
+| STATUS LED green, blinking
+|-
+| <code>:</code>
+| STATUS LED orange
+|-
+| <code>;</code>
+| STATUS LED orange, blinking
+|-
+| <code>3</code>
+| the beep DSM gives when boot has finished
+|-
+| <code>2</code>
+| a shorter beep
+|}
+
+<code>ds212j-microp</code> wraps these (<code>ds212j-microp power-led on</code>, <code>ds212j-microp status-led orange-blink</code>, <code>ds212j-microp beep</code>…). The behaviour follows the DS212j hardware guide:
+
+* '''POWER:''' blinks while booting (the microcontroller does this by itself from power-on) and while shutting down. It goes steady once the system is up.
+* '''Beep:''' one beep when boot has finished.
+* '''STATUS:''' green when all md arrays are healthy. Blinking orange when one is degraded or crashed, or when no array exists.
+
+A oneshot systemd unit sends &quot;power LED steady + beep + STATUS&quot; when the system is up, and &quot;power LED blinking&quot; when it's stopped at shutdown. <code>ds212j-leds</code> updates STATUS and the amber HDD LEDs from mdadm's monitor (<code>PROGRAM</code> in <code>mdadm.conf</code>, on every RAID event) and from a 10-minute timer. It only talks to the microcontroller when the STATUS state changes.
+
+Both scripts and their units are packaged as <code>ds212j-support</code> (<code>pkg/ds212j-support</code>), built with <code>dpkg-deb --root-owner-group -b pkg/ds212j-support</code>.
+
+<span id="fan-an-interrupt-storm-in-the-upstream-dt"></span>
+=== Fan: an interrupt storm in the upstream DT ===
+
+After the first boot, <code>systemd-udevd</code> used ~25% CPU on an idle system. The upstream Synology dtsi gives <code>gpio-fan</code> GPIO 35 as <code>alarm-gpios</code>, with an edge interrupt. But on this board GPIO 35 is the fan '''tachometer''': it toggles all the time while the fan spins. Synology's own <code>GetFanStatus()</code> samples it 200 times and calls the fan &quot;running&quot; if it sees both levels. Every edge raised the &quot;alarm&quot; interrupt, and <code>gpio-fan</code> answered each one with a <code>sysfs_notify()</code> and a uevent:
+
+<pre>$ grep fan /proc/interrupts
+ 35:     105970  f1010140.gpio   3 Edge   GPIO fan alarm
+$ udevadm monitor --kernel     # 263 &quot;change&quot; events in 5 s</pre>
+Deleting <code>alarm-gpios</code> for the DS-212j in the DT fixes it. Fan speed control is unaffected, and the uevents drop to zero.
+
+<span id="step-13--fan-modes-like-dsm"></span>
+== Step 13 – Fan modes like DSM ==
+
+DSM offers four fan modes: '''Full-speed''', '''Cool''', '''Quiet''' and '''Low-power''' (&quot;the fan stops when the system is cold&quot;). The DS-212j has no board or CPU temperature sensor (<code>THERMAL_NO, CPUTMP_NO</code> in Synology's <code>mapping.h</code>), so DSM's <code>scemd</code> daemon drives the fan from the '''disk temperatures'''. Its tables come from the official firmware (<code>DSM_DS212j_25556.pat</code> → <code>hda1.tgz</code>, which is xz despite its name → <code>/usr/syno/etc.defaults/scemd.xml</code>):
+
+<syntaxhighlight lang="xml"><fan_config period="20" threshold="6" type="DUAL_MODE_HIGH" hibernation_speed="STOP">       <!-- Cool -->
+    <disk_temperature fan_speed="ULTRA_LOW"  action="NONE">0</disk_temperature>
+    <disk_temperature fan_speed="VERY_LOW"   action="NONE">33</disk_temperature>
+    <disk_temperature fan_speed="LOW"        action="NONE">41</disk_temperature>
+    <disk_temperature fan_speed="VERY_HIGH"  action="NONE">47</disk_temperature>
+    <disk_temperature fan_speed="ULTRA_HIGH" action="NONE">53</disk_temperature>
+    <disk_temperature fan_speed="ULTRA_HIGH" action="SHUTDOWN">61</disk_temperature>
+</fan_config>
+<!-- DUAL_MODE_LOW (Quiet): 0 ULTRA_LOW, 38 VERY_LOW, 46 LOW, 52 VERY_HIGH, 58 ULTRA_HIGH, 61 SHUTDOWN
+     DUAL_MODE_LOW_STOP (Low-power): 0 STOP, 33 ULTRA_LOW, then like Quiet --></syntaxhighlight>
+The speed levels are the 3-bit value on GPIO 32-34 (<code>FanStatusMappingType1()</code>: STOP 0, ULTRA_LOW 1, VERY_LOW 2, LOW 4, VERY_HIGH 6, ULTRA_HIGH 7). The DT lists all eight values in that order (see the appendix), and <code>ds212j-fan</code> reproduces scemd '''exactly''':
+
+* It polls every 20 s, using the hottest internal disk (<code>smartctl -n standby -A</code>, which never wakes a sleeping disk).
+* It speeds up at once and slows down only after 6 polls in a row (<code>threshold=&quot;6&quot;</code>).
+* The fan stops while the disks hibernate.
+* It shuts the NAS down at 61 °C.
+
+The mode is set in <code>/etc/default/ds212j-fan</code> (<code>MODE=full|cool|quiet|low-power</code>). Measured on this unit, level VERY_LOW (2) actually stops the fan. DSM does the same.
+
+<span id="step-14--disk-hibernation-like-dsm"></span>
+== Step 14 – Disk hibernation like DSM ==
+
+* '''Spin-down:''' a udev rule applies <code>hdparm -S</code> to the two internal disks whenever they appear. The delay is set in <code>/etc/default/ds212j-disks</code> (<code>SPINDOWN_MINUTES=10</code>, like DSM's &quot;HDD hibernation&quot; setting).
+* '''Nothing writes to the disks every few minutes.''' journald keeps the journal in RAM (<code>Storage=volatile</code>, 16 MB), <code>rsyslog</code> is removed, and <code>ds212j-logsave</code> appends the journal to <code>/var/log/journal-saved/YYYY-MM.log</code> once a day and at every clean shutdown. A power cut loses at most a day of logs. The root filesystem is already mounted <code>noatime</code>.
+* '''The front panel looks like DSM's.''' The DS212j is <code>HIBER_LED_POWER_ONLY</code> in Synology's source. While both disks are in standby (<code>hdparm -C</code>, which doesn't wake them), only the power LED stays lit: STATUS goes off (<code>7</code>) and the green HDD LEDs go off. The &quot;presence&quot; bit of the SATA LED register (<code>0xF108002C</code> bit 2) is cleared through <code>/dev/mem</code>, so the LEDs only blink on activity. The fan stops too. Everything returns when a disk wakes up.
+
+To check whether the disks are really asleep: <code>sudo hdparm -C /dev/sda /dev/sdb</code>.
+
+<span id="step-15--copyparty-file-server"></span>
+== Step 15 – copyparty file server ==
+
+[https://github.com/9001/copyparty copyparty] suits this box much better than Nextcloud. Nextcloud needs PHP, a database and 512 MB+ of RAM, and 32-bit support is being deprecated. copyparty is a single Python file that gives a web UI with resumable uploads, WebDAV, search, and thumbnails (<code>python3-pil</code>, <code>ffmpeg</code>).
+
+* The official single-file release, <code>copyparty-sfx.py</code>, is checked against the SHA-256 published on GitHub and installed in <code>/usr/local/bin</code>.
+* It runs as a dedicated <code>copyparty</code> user under a hardened unit (<code>config/copyparty/copyparty.service</code>): <code>ProtectSystem=strict</code>, with only <code>/srv/files</code> and <code>/var/lib/copyparty</code> writable.
+* The config is <code>/etc/copyparty/copyparty.conf</code> (<code>config/copyparty/copyparty.conf.template</code>): one account with full rights on <code>/srv/files</code> (RAID1), no anonymous access, and the index and thumbnails kept in <code>/var/lib/copyparty</code>.
+
+<pre>sudo apt install --no-install-recommends python3-pil ffmpeg
+sudo useradd --system --home-dir /var/lib/copyparty --create-home --shell /usr/sbin/nologin copyparty
+sudo install -m 755 copyparty-sfx.py /usr/local/bin/
+sudo install -d -o copyparty -g copyparty /srv/files
+sudo systemctl enable --now copyparty        # -&gt; http://ds212j:3923/</pre>
+<!-- next steps are appended as they are done -->
+
+<span id="appendix--the-device-tree-changes-explained"></span>
+== Appendix – The device-tree changes explained ==
+
+The DS-212j DT patch (<code>patches/linux/0001-ARM-dts-kirkwood-ds212j-fix-RAM-SATA-HDD-power-and-LEDs.patch</code>) makes six changes, all to <code>arch/arm/boot/dts/marvell/kirkwood-ds212j.dts</code>. Each one is a place where the upstream description of the board didn't match the real hardware. This appendix explains what changed, and above all '''how I found out what to change'''. Every change rests on at least two independent sources.
+
+<span id="background-how-the-ds-212j-device-tree-is-built"></span>
+=== Background: how the DS-212j device tree is built ===
+
+The DTB tells the generic Kirkwood kernel what is on this particular board. It is built from four files:
+
+<pre>kirkwood.dtsi            → the SoC itself (UARTs, SATA, USB, GPIO controllers…)
+kirkwood-6281.dtsi       → the 88F6281 variant (pin groups such as &quot;sata0&quot;, &quot;sata1&quot;)
+kirkwood-synology.dtsi   → blocks shared by 16 Synology models, mostly
+                           status = &quot;disabled&quot;, for each model to switch on
+kirkwood-ds212j.dts      → the DS-212j: switches on the blocks that apply</pre>
+The board file is short, and that's where the bugs were. It switched on the wrong shared blocks, or didn't switch on the right ones. The shared <code>.dtsi</code> files are left untouched, and every fix is an override in <code>kirkwood-ds212j.dts</code>, so no other Synology model is affected.
+
+<span id="where-the-information-came-from"></span>
+=== Where the information came from ===
+
+{| class="wikitable"
+|-
+! Source
+! What it gave
+|-
+| '''The stock U-Boot''', over the serial console
+| the boot banner, the DDR register list (step 2), and the pin-mux (MPP) and GPIO register values
+|-
+| '''Synology's GPL source''' for the DSM 6.2 kernel (<code>linux-2.6.32</code>, model <code>6281</code>) and its <code>synobios</code> module, from Synology's download site (''ToolChain → Synology NAS GPL Source'')
+| the GPIO map and LED handling Synology itself uses on the DS212j
+|-
+| '''Experiments on the running NAS'''
+| kernel error messages, toggling GPIOs with <code>gpioset</code>, counting interrupts and udev events
+|-
+| '''Watching the front panel'''
+| which LED or beep reacts to which command
+|}
+
+The Synology files that matter are <code>arch/arm/mach-feroceon-kw/synology-gpio.c</code> (the per-model GPIO tables), <code>arch/arm/mach-kirkwood/include/mach/synology.h</code>, and <code>synobios/mv6281/ds212j.c</code> (DS212j-specific LED and fan code).
+
+<span id="1-ram-128-mb--256-mb"></span>
+=== 1. RAM: 128 MB → 256 MB ===
+
+<syntaxhighlight lang="diff">-       reg = <0x00000000 0x8000000>;
++       reg = <0x00000000 0x10000000>;  /* 256 MB: 2 x 128 MB chip selects */</syntaxhighlight>
+'''Evidence:'''
+
+<ul>
+<li>The stock U-Boot banner shows two 128 MB chip selects:
+<pre>DRAM CS[0] base 0x00000000   size 128MB
+DRAM CS[1] base 0x08000000   size 128MB
+DRAM Total size 256MB  16bit width</pre></li>
+<li>The DDR init list in the stock bootloader header enables both: <code>0xFFD01504 = 0x07FFFFF1</code> (CS0, 128 MB, enabled) and <code>0xFFD0150C = 0x07FFFFF5</code> (CS1, 128 MB, enabled).</li>
+<li>After the change Linux reports <code>node 0: [mem 0x00000000-0x0fffffff]</code>, and <code>free</code> shows 239 MB usable.</li></ul>
+
+Mainline U-Boot fixes up the memory node at boot anyway, but the DT should be right for any bootloader.
+
+<span id="2-disk-power-enable-regulators-hdd-29"></span>
+=== 2. Disk power: enable <code>regulators-hdd-29</code> ===
+
+<syntaxhighlight lang="diff">+   /* HDD1/HDD2 power switches: GPIO 29 and 31, both off at reset */
++   regulators-hdd-29 {
++       status = "okay";
++   };</syntaxhighlight>
+'''Symptom:''' once SATA was probing (see #3), both ports stayed at <code>ata1: SATA link down (SStatus 0 SControl F300)</code>. No disk was even electrically present, yet DSM had seen both.
+
+'''How the pins were found:''' tangrs had already found GPIO 29/31 in 2021, from Synology's source and by toggling them through <code>/sys/class/gpio</code> until the drives spun up. That [https://gist.github.com/tangrs/c3e6bd13b849d5a5bcf9d338550427fe gist] enables the same <code>regulators-hdd-29</code> block. I re-checked it independently on this unit:
+
+<ol style="list-style-type: decimal;">
+<li><code>kirkwood-synology.dtsi</code> lists the HDD-power GPIOs used by the various models: 29, 30, 31, 34, 44 and 45.</li>
+<li>On the running NAS, <code>gpioget</code> showed all of them as inputs reading 0, so nothing was powering the disks.</li>
+<li>I drove them high one at a time and rescanned SATA:
+<pre># gpioset -c 0 -z 29=1; sleep 10; echo &quot;- - -&quot; &gt; /sys/class/scsi_host/host0/scan
+ata1: SATA link up 3.0 Gbps (SStatus 123 SControl F300)
+ata1.00: ATA-8: ST32000644NS, SN11, max UDMA/133</pre>
+GPIO 29 powers disk 1, and GPIO 31 does the same for disk 2.</li>
+<li>Synology's source confirms it (<code>synology-gpio.c</code>). The DS212j reuses the DS109 table, which has <code>.hdd2_pm = 31</code>, and adds HDD1:
+<syntaxhighlight lang="c">KW_6281_212j_GPIO_init(SYNO_KW_GENERIC_GPIO *global_gpio)
+{
+ KW_6281_109_GPIO_init(global_gpio);
+ global_gpio->hdd_pm.hdd1_pm = 29;
+}</syntaxhighlight>
+<code>libata</code> switches a disk on with <code>SYNO_CTRL_HDD_POWERON(port, 1)</code>, so the line is '''active high''', and DSM waits 3 s between the two disks.</li></ol>
+
+'''The fix:''' <code>kirkwood-synology.dtsi</code> already describes exactly this, in a disabled block called <code>regulators-hdd-29</code>: two always-on fixed regulators named <code>hdd1power</code> (GPIO 29) and <code>hdd2power</code> (GPIO 31), active high, each with a 5 s start-up delay. The DS-212j file simply never enabled it. The new U-Boot does the same in its board code (HDD1 at early init, HDD2 3 s later), so the disks are already spinning when U-Boot scans SATA and when Linux starts.
+
+<span id="3-sata-pin-conflict-route-only-mpp2021-to-the-sata-controller"></span>
+=== 3. SATA pin conflict: route only MPP20/21 to the SATA controller ===
+
+<syntaxhighlight lang="diff">+&pinctrl {
++   pmx_sata0_act_21: pmx-sata0-act-21 {
++       marvell,pins = "mpp21";
++       marvell,function = "sata0";
++   };
++
++   pmx_sata1_act_20: pmx-sata1-act-20 {
++       marvell,pins = "mpp20";
++       marvell,function = "sata1";
++   };
++};
++
++&sata {
++   pinctrl-0 = <&pmx_sata0_act_21 &pmx_sata1_act_20>;
++   pinctrl-names = "default";
++   marvell,led-act-presence;   /* see #5 */
++};</syntaxhighlight>
+'''Symptom:''' on the very first boot, the SATA driver didn't even load:
+
+<pre>kirkwood-pinctrl f1010000.pin-controller: pin PIN21 already requested by gpio-leds-hdd-21-2; cannot claim for f1080000.sata
+sata_mv f1080000.sata: error -EINVAL: Error applying setting, reverse things back</pre>
+'''Cause:''' the SoC's pins are multi-purpose (&quot;MPP&quot;), and two blocks claimed the same ones:
+
+* <code>kirkwood-synology.dtsi</code> gives the SATA controller the <code>sata0</code> and <code>sata1</code> pin groups, which <code>kirkwood-6281.dtsi</code> defines as MPP 5/21/23 and MPP 4/20/22 (the activity/presence LED outputs);
+* <code>kirkwood-ds212j.dts</code> enabled <code>gpio-leds-hdd-21-2</code>, which uses MPP 20-23 as plain GPIOs.
+
+The kernel won't give a pin to two drivers, so <code>sata_mv</code> gave up.
+
+'''What each pin should be:''' three sources agree.
+
+<ul>
+<li>'''The stock pin-mux registers''', read from the stock U-Boot prompt:
+<pre>Marvell&gt;&gt; md.l f1010000 7
+f1010000: 01002222 03303311 00550000 00000000</pre>
+The third word covers MPP16-23, one nibble per pin starting from MPP16. <code>00550000</code> means MPP 20-23 are function 0 (GPIO) at boot, and the first word shows MPP 4/5 are GPIO as well.</li>
+<li>'''Synology's DS212j LED code''' (<code>synobios/mv6281/ds212j.c</code>, <code>SetHDDActLed()</code>): to light the disk LEDs, DSM switches MPP 20/21 to function <code>0x5</code>:
+<syntaxhighlight lang="c">case SYNO_LED_ON:
+  SYNOMppCtrlRegWrite(20, 0x5);
+  SYNOMppCtrlRegWrite(21, 0x5);</syntaxhighlight></li>
+<li>'''The kernel's pin table''' (<code>drivers/pinctrl/mvebu/pinctrl-kirkwood.c</code>) names that function:
+<syntaxhighlight lang="c">MPP_VAR_FUNCTION(0x5, "sata1", "act", V(0, 0, 1, 1, 1, 0, 0)),   /* MPP20 */
+MPP_VAR_FUNCTION(0x5, "sata0", "act", V(0, 1, 1, 1, 1, 0, 0)),   /* MPP21 */</syntaxhighlight>
+It's valid on the 88F6281.</li></ul>
+
+So the DT gains two pin-mux nodes (MPP21 → <code>sata0</code> act = HDD1 green, MPP20 → <code>sata1</code> act = HDD2 green), and the SATA node claims only those two pins instead of the generic six. MPP 22/23 stay GPIOs for the orange LEDs, and MPP 4/5 are left alone.
+
+<span id="4-disk-leds-replace-gpio-leds-hdd-21-2-with-gpio-leds-hdd-fault"></span>
+=== 4. Disk LEDs: replace <code>gpio-leds-hdd-21-2</code> with <code>gpio-leds-hdd-fault</code> ===
+
+<syntaxhighlight lang="diff">-   gpio-leds-hdd-21-2 {
+-       status = "okay";
+-   };
++   gpio-leds-hdd-fault {
++       compatible = "gpio-leds";
++       pinctrl-0 = <&pmx_hddled_23 &pmx_hddled_22>;
++       pinctrl-names = "default";
++
++       led-hdd1-amber {
++           label = "synology:amber:hdd1";
++           gpios = <&gpio0 23 GPIO_ACTIVE_LOW>;
++           default-state = "off";
++       };
++
++       led-hdd2-amber {
++           label = "synology:amber:hdd2";
++           gpios = <&gpio0 22 GPIO_ACTIVE_LOW>;
++           default-state = "off";
++       };
++   };</syntaxhighlight>
+'''Why:''' with the upstream node, all four disk LEDs were GPIO LEDs that nothing ever lit, so the front panel stayed dark. DSM uses two different mechanisms:
+
+<ul>
+<li>'''Green''' is hardware, driven by the SATA controller through MPP20/21 (#3 and #5).</li>
+<li>'''Orange''' is software. <code>synology-gpio.c</code> has <code>.hdd1_fail_led = 23, .hdd2_fail_led = 22</code>, and the LED function writes <code>fail_led = 0</code> for orange and <code>1</code> for off/green, so the LEDs are '''active low''':
+<syntaxhighlight lang="c">} else if ( DISK_LED_ORANGE_SOLID == status ||
+  DISK_LED_ORANGE_BLINK == status ) {
+  fail_led = 0;</syntaxhighlight></li></ul>
+
+The new node therefore keeps only the two orange LEDs, under the same names as before (<code>synology:amber:hdd1/2</code> in <code>/sys/class/leds/</code>). The <code>ds212j-leds</code> script (step 12) lights them when a disk is faulty in the RAID or fails SMART.
+
+<span id="5-marvellled-act-presence-green--present-blinking--activity"></span>
+=== 5. <code>marvell,led-act-presence</code>: green = present, blinking = activity ===
+
+Routing MPP20/21 to the SATA controller isn't quite enough. By default the controller only lights its &quot;act&quot; outputs '''during I/O'''. DSM's green LEDs are '''on while a disk is present''' and blink on activity.
+
+<ul>
+<li>'''DSM:''' the same Synology LED function begins with
+<syntaxhighlight lang="c">MV_REG_WRITE(SATAHC_LED_CONFIG_REG, SATAHC_LED_ACT_PRESENT);</syntaxhighlight>
+and <code>mach-kirkwood/include/mach/synology.h</code> defines <code>SATAHC_LED_CONFIG_REG = SATA base | 0x2C</code> and <code>SATAHC_LED_ACT_PRESENT = 0x4</code>.</li>
+<li>'''Mainline Linux:''' <code>drivers/ata/sata_mv.c</code> already knows that register and bit, <code>SOC_LED_CTRL = 0x2c</code> and <code>SOC_LED_CTRL_ACT_PRESENCE = (1 &lt;&lt; 2)</code> (&quot;Multiplex dev presence with dev activity LED&quot;), but nothing ever sets it.</li></ul>
+
+This is the only change that also needs a driver patch, <code>0002-ata-sata_mv-optional-presence-activity-LED-mode.patch</code> (<code>patches/linux/0002-ata-sata_mv-optional-presence-activity-LED-mode.patch</code>). It adds an optional <code>marvell,led-act-presence</code> DT property, and when the property is present <code>sata_mv</code> sets the bit at initialisation. Using a property means only boards that ask for it change behaviour.
+
+<span id="6-fan-delete-alarm-gpios"></span>
+=== 6. Fan: delete <code>alarm-gpios</code> ===
+
+<syntaxhighlight lang="diff">    gpio-fan-100-32-35 {
+        status = "okay";
++       /delete-property/ alarm-gpios;
+    };</syntaxhighlight>
+'''Symptom:''' <code>systemd-udevd</code> used about 25% CPU on an idle system. tangrs describes exactly this (19% idle CPU) in the post, and confirmed the tachometer by stopping the fan by hand and watching the pin stop toggling.
+
+'''Diagnosis:'''
+
+<ul>
+<li><code>gpio-fan-100-32-35</code> in <code>kirkwood-synology.dtsi</code> uses GPIO 32-34 as the 3-bit speed selector and GPIO 35 as <code>alarm-gpios</code>. For an alarm line, the <code>gpio-fan</code> driver requests an edge interrupt and, on each one, sends a <code>sysfs_notify()</code> and a uevent so userspace can react to a fan failure.</li>
+<li>But Synology's <code>ds212j.c</code> shows GPIO 35 is the fan's '''tachometer'''. <code>GetFanStatus()</code> samples it up to 200 times, 300 µs apart, and reports the fan as running only if it sees '''both''' levels. While the fan spins, it's a square wave.</li>
+<li>Measured on the NAS:
+<pre>$ grep -i fan /proc/interrupts
+ 35:     105970  f1010140.gpio   3 Edge      GPIO fan alarm
+$ sudo timeout 5 udevadm monitor --kernel | grep -c change
+263</pre>
+Every tach edge was handled as a &quot;fan alarm&quot;, which meant a uevent and a wake-up of <code>systemd-udevd</code>, about 50 times a second.</li></ul>
+
+'''The fix:''' <code>/delete-property/</code> removes that single property for the DS-212j. Fan speed control keeps working (gpio-fan, <code>fan1_input</code> in hwmon), the interrupt disappears, and the uevents drop to 0. GPIO 35 is now free for a userspace fan-failure check that counts its edges, as DSM does.
+
+tangrs fixed it differently: the gist enables the shared <code>gpio-fan-150-32-35</code> block instead of <code>gpio-fan-100-32-35</code>. That block has no <code>alarm-gpios</code>, but it also has a '''different speed table''':
+
+<pre>gpio-fan-100-32-35:  0→0  2500→1  3100→2  3800→3  4600→4  4800→5  4900→6  5000→7
+gpio-fan-150-32-35:  0→0  2200→1  2500→2  3000→4  3300→3  3700→5  3800→6  4200→7</pre>
+The <code>-150</code> ordering (value 4 below value 3) matches DSM's own <code>FanStatusMappingType1()</code> in <code>synobios/mapping.c</code>, which maps VERY_LOW → 2, MIDDLE → 3, LOW → 4, HIGH → 5. To decide which table is right, I '''measured''' the fan, now that GPIO 35 is free. For each value I waited 15 s, then counted tach pulses for 10 s (<code>gpiomon -c 1 -e rising 3</code>), assuming 2 pulses per revolution:
+
+{| class="wikitable"
+|-
+! Value
+! Measured
+! <code>-100</code> says
+! <code>-150</code> says
+|-
+| 0
+| stopped
+| 0
+| 0
+|-
+| 1
+| ~925 rpm
+| 2500
+| 2200
+|-
+| 2
+| '''stopped''' (no tach pulses)
+| 3100
+| 2500
+|-
+| 3
+| ~920 rpm
+| 3800
+| 3300
+|-
+| 4
+| ~1620 rpm
+| 4600
+| 3000
+|-
+| 5
+| ~1690 rpm
+| 4800
+| 3700
+|-
+| 6
+| ~1640 rpm
+| 4900
+| 3800
+|-
+| 7
+| ~1700 rpm
+| 5000
+| 4200
+|}
+
+Neither table matches this unit's fan. In practice it has two speeds (~920 and ~1650-1700 rpm), and '''value 2 stops it''', although both tables list value 2 as a running speed. The default left by U-Boot (and what gpio-fan reports, &quot;3800&quot;) is value 3, about 920 rpm.
+
+<span id="checking-the-dtb-on-the-nas"></span>
+=== Checking the DTB on the NAS ===
+
+<code>tools/build-kernel-deb.sh</code> applies the patch, <code>make bindeb-pkg</code> ships the DTB in <code>/usr/lib/linux-image-&lt;version&gt;/kirkwood-ds212j.dtb</code>, and <code>u-boot-menu</code> points <code>extlinux.conf</code> at it (<code>fdt …</code>). U-Boot loads it, fixes up the memory size and MAC address, and passes it to the kernel. To see what the running system actually uses:
+
+<pre>dtc -I dtb -O dts /usr/lib/linux-image-$(uname -r)/kirkwood-ds212j.dtb | less
+ls /proc/device-tree/                       # the live tree the kernel booted with
+cat /sys/kernel/debug/pinctrl/*/pinmux-pins # who owns each MPP (mount debugfs first)</pre>
+<span id="coverage-compared-with-the-earlier-write-ups"></span>
+== Coverage compared with the earlier write-ups ==
+
+{| class="wikitable"
+|-
+! Topic
+! tangrs (2021)
+! Debian wiki (DS218j)
+! This guide
+|-
+| Serial console, stop U-Boot
+| ✔
+| ✔ (pinout)
+| ✔ (step 1)
+|-
+| How DSM boots (<code>.pat</code>, <code>linuxrc.syno</code>, setup mode)
+| ✔
+| –
+| not needed: DSM is not used to boot
+|-
+| Debian root under the DSM kernel
+| ✔ (fails: kernel too old)
+| –
+| not needed
+|-
+| Boot Debian's kernel from stock U-Boot (appended DTB, <code>mkimage</code>, TFTP)
+| ✔
+| ✔ (DS218j, from disk)
+| replaced by a mainline U-Boot (steps 4, 7, 9); our kernel still has <code>ARM_APPENDED_DTB</code> + <code>ATAG_DTB_COMPAT</code> for that route
+|-
+| Backup of the flash
+| –
+| –
+| ✔ (step 2, verified twice)
+|-
+| HDD power, GPIO 29/31
+| ✔
+| –
+| ✔ (DT + U-Boot staggered spin-up)
+|-
+| Fan GPIO 35 = tachometer, udev storm
+| ✔ (<code>gpio-fan-150</code>)
+| –
+| ✔ (<code>/delete-property/</code>), plus measured speed table
+|-
+| RAM 256 MB, SATA pinctrl conflict
+| –
+| –
+| ✔
+|-
+| U-Boot gives up on slow-spinning drives
+| –
+| –
+| ✔ (<code>sata_mv</code> patch)
+|-
+| Permanent install (no TFTP or serial at boot)
+| listed as future work
+| ✔ (bootcmd + raw sectors)
+| ✔ (U-Boot in flash, extlinux)
+|-
+| Small initrd (<code>tiny-initramfs</code>)
+| listed as future work
+| –
+| not needed: no initramfs, RAID1 root autodetected
+|-
+| Debian kernel packages
+| uses Debian's <code>linux-image-marvell</code> (no longer in trixie)
+| <code>bindeb-pkg</code>
+| ✔ (step 11)
+|-
+| LEDs, power LED, beep, status LED
+| –
+| &quot;some LEDs don't work&quot;
+| ✔ (step 12)
+|-
+| Power-off (&quot;LED stays on after shutdown&quot; on DS218j)
+| –
+| ✔ (needs a kernel patch there)
+| driver enabled (<code>synology,power-off</code>), '''not tested yet'''
+|-
+| DSM firmware downgrader, kexec
+| mentioned
+| –
+| out of scope
+|-
+| Upstreaming the DT changes
+| gist, not merged
+| –
+| patches ready in <code>patches/</code>, '''not submitted yet'''
+|}
+
+[[Category:Synology]]
+[[Category:Debian]]
+[[Category:Linux]]

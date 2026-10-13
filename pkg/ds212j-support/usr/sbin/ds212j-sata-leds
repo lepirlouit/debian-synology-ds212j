@@ -1,0 +1,16 @@
+#!/usr/bin/python3
+# DS-212j green HDD LEDs: switch the SATA controller's "presence" LED mode.
+#   presence on  : LED lit while a disk is present, blinking on activity (normal)
+#   presence off : LED only blinks on activity, dark otherwise (DSM hibernation)
+# Register: SATA LED control, 0xF108002C, bit 2 (Linux sata_mv SOC_LED_CTRL_ACT_PRESENCE,
+# Synology SATAHC_LED_ACT_PRESENT). Other bits are preserved.
+import mmap, os, struct, sys
+BASE, REG, BIT = 0xF1080000, 0x2C, 1 << 2
+if sys.argv[1:] not in (["presence", "on"], ["presence", "off"]):
+    sys.exit("usage: ds212j-sata-leds presence on|off")
+fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(fd, mmap.PAGESIZE, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=BASE)
+v = struct.unpack_from("<I", m, REG)[0]
+v = v | BIT if sys.argv[2] == "on" else v & ~BIT
+struct.pack_into("<I", m, REG, v)
+m.close(); os.close(fd)

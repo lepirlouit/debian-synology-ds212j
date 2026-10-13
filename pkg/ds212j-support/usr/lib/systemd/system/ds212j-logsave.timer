@@ -1,0 +1,9 @@
+[Unit]
+Description=Save the in-RAM journal to disk once a day
+
+[Timer]
+OnCalendar=*-*-* 04:00
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

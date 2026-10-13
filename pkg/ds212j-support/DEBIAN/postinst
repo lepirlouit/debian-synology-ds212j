@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+if [ "$1" = configure ]; then
+	conf=/etc/mdadm/mdadm.conf
+	if [ -f "$conf" ]; then
+		# upgrade from 1.0/1.1: the script was renamed
+		sed -i 's|^PROGRAM /usr/sbin/ds212j-hdd-leds$|PROGRAM /usr/sbin/ds212j-leds|' "$conf"
+		grep -q '^PROGRAM' "$conf" || echo 'PROGRAM /usr/sbin/ds212j-leds' >> "$conf"
+	fi
+	rm -f /etc/systemd/system/timers.target.wants/ds212j-hdd-leds.timer
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	# journal in RAM (journald.conf.d/ds212j.conf), saved by ds212j-logsave
+	systemctl restart systemd-journald.service >/dev/null 2>&1 || true
+	systemctl enable --now ds212j-logsave.timer ds212j-logsave-shutdown.service >/dev/null 2>&1 || true
+	# disk hibernation delay
+	udevadm control --reload >/dev/null 2>&1 || true
+	udevadm trigger -c change -s block >/dev/null 2>&1 || true
+	systemctl try-restart mdmonitor.service >/dev/null 2>&1 || true
+	systemctl enable ds212j-power-led.service ds212j-leds.timer ds212j-fan.service >/dev/null 2>&1 || true
+	systemctl start ds212j-leds.timer >/dev/null 2>&1 || true
+	systemctl restart ds212j-fan.service >/dev/null 2>&1 || true
+	rm -f /run/ds212j-status-led
+	systemctl start ds212j-leds.service >/dev/null 2>&1 || true
+fi

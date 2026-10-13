@@ -1,0 +1,76 @@
+From 6c67ccde763d2e54369da59226c332025f50e528 Mon Sep 17 00:00:00 2001
+From: lepirlouit <bdb@aloalto.com>
+Date: Tue, 13 Oct 2026 15:37:58 +0200
+Subject: [PATCH 2/3] ata: sata_mv: wait for the drive to spin up before giving
+ up on IDENTIFY
+
+When the drives are powered on by the board code just before the SATA
+scan (e.g. Synology NAS boards switch HDD power via GPIOs), the link
+comes up quickly but enterprise drives such as the Seagate ST32000644NS
+need ~18 s before they answer ATA IDENTIFY. Only two attempts 10 ms
+apart were made, so the drives were never found on a cold boot.
+
+Keep retrying for up to 30 s once the link is up. Ports without a drive
+have no link and are not delayed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/ata/sata_mv.c | 31 +++++++++++++++++++++++--------
+ 1 file changed, 23 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/ata/sata_mv.c b/drivers/ata/sata_mv.c
+index b8c73b4a..cb8bf9a4 100644
+--- a/drivers/ata/sata_mv.c
++++ b/drivers/ata/sata_mv.c
+@@ -796,10 +796,13 @@ static int mv_ata_exec_ata_cmd_nondma(struct udevice *dev, int port,
+ 	return len;
+ }
+ 
++/* Retry ATA IDENTIFY for up to ~30 s while the drive spins up */
++#define SATA_MV_IDENTIFY_TRIES	30
++
+ static int mv_sata_identify(struct udevice *dev, int port, u16 *id)
+ {
+ 	struct sata_fis_h2d h2d;
+-	int len;
++	int len, tries;
+ 
+ 	memset(&h2d, 0, sizeof(struct sata_fis_h2d));
+ 
+@@ -824,14 +827,26 @@ static int mv_sata_identify(struct udevice *dev, int port, u16 *id)
+ 	if (ata_id_n_sectors(id) != 0)
+ 		return len;
+ 
+-	/* Issue the 2nd ATA ID command to make sure the ID words are
+-	 * populated properly.
++	/* Issue more ATA ID commands to make sure the ID words are
++	 * populated properly. The link is already up at this point, so an
++	 * empty answer means the drive is still spinning up: some drives
++	 * need close to 20 s after power-on, so keep asking for a while.
+ 	 */
+-	mdelay(10);
+-	len = mv_ata_exec_ata_cmd_nondma(dev, port, &h2d, (u8 *)id,
+-					 ATA_ID_WORDS * 2, READ_CMD);
+-	if (ata_id_n_sectors(id) != 0)
+-		return len;
++	for (tries = 0; tries < SATA_MV_IDENTIFY_TRIES; tries++) {
++		mdelay(tries ? 1000 : 10);
++		len = mv_ata_exec_ata_cmd_nondma(dev, port, &h2d, (u8 *)id,
++						 ATA_ID_WORDS * 2, READ_CMD);
++		if (ata_id_n_sectors(id) != 0) {
++			if (tries)
++				puts(" done\n");
++			return len;
++		}
++		if (!tries)
++			printf("SATA%d: waiting for drive to spin up", port);
++		else
++			putc('.');
++	}
++	putc('\n');
+ 
+ 	printf("Err: Failed to identify SATA device %d\n", port);
+ 	return -ENODEV;
+-- 
+2.43.0
+
