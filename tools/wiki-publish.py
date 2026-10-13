@@ -3,7 +3,9 @@
 
 usage: wiki-publish.py <api-url> <credentials-file> <page title> <file.mediawiki> [--overwrite]
 
-The credentials file holds one line "User@botname:password" (Special:BotPasswords).
+The credentials file holds one line "User@botname:password" (a bot password from
+Special:BotPasswords, recommended) or "User:password" (main account, logged in with
+action=clientlogin; does not work with two-factor authentication).
 Without --overwrite, an existing page is left untouched.
 """
 import http.cookiejar
@@ -38,10 +40,17 @@ def call(params, post=False):
 
 
 token = call({"action": "query", "meta": "tokens", "type": "login"})["query"]["tokens"]["logintoken"]
-login = call({"action": "login", "lgname": user, "lgpassword": password, "lgtoken": token}, post=True)
-if login["login"]["result"] != "Success":
-    sys.exit(f"login failed: {login['login'].get('reason', login['login']['result'])}")
-print(f"logged in as {login['login']['lgusername']}")
+if "@" in user:   # bot password
+    login = call({"action": "login", "lgname": user, "lgpassword": password, "lgtoken": token}, post=True)
+    if login["login"]["result"] != "Success":
+        sys.exit(f"login failed: {login['login'].get('reason', login['login']['result'])}")
+    print(f"logged in as {login['login']['lgusername']} (bot password)")
+else:             # main account
+    login = call({"action": "clientlogin", "username": user, "password": password,
+                  "logintoken": token, "loginreturnurl": api}, post=True)["clientlogin"]
+    if login["status"] != "PASS":
+        sys.exit(f"login failed: {login['status']}: {login.get('message', '')}")
+    print(f"logged in as {login['username']} (main account)")
 
 page = call({"action": "query", "titles": title})["query"]["pages"][0]
 exists = not page.get("missing", False)
