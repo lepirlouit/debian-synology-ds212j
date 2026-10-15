@@ -1,0 +1,4 @@
+# DS-212j: no scatter-gather/TSO on eth0. Under memory pressure mv643xx_eth cannot
+# linearize fragmented skbs ("failed to linearize skb with tiny unaligned fragment"),
+# drops every one of them and the NAS stops sending while the system keeps running.
+ACTION=="add", SUBSYSTEM=="net", KERNEL=="eth0", RUN+="/usr/sbin/ethtool -K eth0 sg off tso off"

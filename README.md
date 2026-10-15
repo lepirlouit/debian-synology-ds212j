@@ -586,6 +586,41 @@ sudo install -d -o copyparty -g copyparty /srv/files
 sudo systemctl enable --now copyparty        # -> http://ds212j:3923/
 ```
 
+## Step 16 – The network dies under memory pressure
+
+While copying 1.5 TB onto the NAS (a local copy from a USB disk through `ntfs-3g`, plus an SMB
+mount of another NAS, with copyparty indexing the new files), the DS-212j dropped off the
+network: no ping, no ARP reply. The disk LEDs kept blinking. The system was still running and
+the copy went on, but **nothing left the box**. Unplugging and replugging the cable brought it
+back, and the kernel log showed why:
+
+```
+mv643xx_eth_port mv643xx_eth_port.0 eth0: failed to linearize skb with tiny unaligned fragment
+...                                              (18124 times in 4 minutes)
+mv643xx_eth_port mv643xx_eth_port.0 eth0: link down
+mv643xx_eth_port mv643xx_eth_port.0 eth0: link up, 1000 Mb/s, full duplex, flow control disabled
+```
+
+The Kirkwood Ethernet controller can't send a packet whose fragments are too small or
+unaligned. For those, `mv643xx_eth` calls `skb_linearize()`, which needs a new contiguous
+buffer. With 256 MB of RAM almost full (`kswapd` busy, 12 MB free), that allocation fails and
+the driver drops the packet. Every outgoing packet ends up dropped. The link reset only helped
+for a moment: the errors started again right after the cable was back, at 50–150 per second.
+
+The fix is not to hand the driver fragmented packets at all:
+
+- **No scatter-gather and no TSO on `eth0`**: `ethtool -K eth0 sg off tso off`, applied by a
+  udev rule every time `eth0` appears. The kernel then builds each packet in one linear buffer
+  itself. The errors stopped at the exact second this was applied, and the copy went on at the
+  same speed (the CPU is the bottleneck anyway, not the NIC).
+- **A larger free-memory reserve**: `vm.min_free_kbytes = 8192` (the kernel picked 1979 for
+  256 MB), so that atomic allocations in the network path find memory.
+
+Both are in `ds212j-support` 1.8 (`/usr/lib/udev/rules.d/70-ds212j-eth0-no-sg.rules`,
+`/usr/lib/sysctl.d/60-ds212j-mem.conf`). Also, keep copyparty from indexing a large volume
+while it is being filled (volume flag `d2d`), because its indexer added to the memory
+pressure.
+
 <!-- next steps are appended as they are done -->
 
 ## Appendix – The device-tree changes explained

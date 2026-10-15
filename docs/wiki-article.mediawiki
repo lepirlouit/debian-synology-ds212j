@@ -457,6 +457,24 @@ sudo useradd --system --home-dir /var/lib/copyparty --create-home --shell /usr/s
 sudo install -m 755 copyparty-sfx.py /usr/local/bin/
 sudo install -d -o copyparty -g copyparty /srv/files
 sudo systemctl enable --now copyparty        # -&gt; http://ds212j:3923/</pre>
+<span id="step-16--the-network-dies-under-memory-pressure"></span>
+== Step 16 – The network dies under memory pressure ==
+
+While copying 1.5 TB onto the NAS (a local copy from a USB disk through <code>ntfs-3g</code>, plus an SMB mount of another NAS, with copyparty indexing the new files), the DS-212j dropped off the network: no ping, no ARP reply. The disk LEDs kept blinking. The system was still running and the copy went on, but '''nothing left the box'''. Unplugging and replugging the cable brought it back, and the kernel log showed why:
+
+<pre>mv643xx_eth_port mv643xx_eth_port.0 eth0: failed to linearize skb with tiny unaligned fragment
+...                                              (18124 times in 4 minutes)
+mv643xx_eth_port mv643xx_eth_port.0 eth0: link down
+mv643xx_eth_port mv643xx_eth_port.0 eth0: link up, 1000 Mb/s, full duplex, flow control disabled</pre>
+The Kirkwood Ethernet controller can't send a packet whose fragments are too small or unaligned. For those, <code>mv643xx_eth</code> calls <code>skb_linearize()</code>, which needs a new contiguous buffer. With 256 MB of RAM almost full (<code>kswapd</code> busy, 12 MB free), that allocation fails and the driver drops the packet. Every outgoing packet ends up dropped. The link reset only helped for a moment: the errors started again right after the cable was back, at 50–150 per second.
+
+The fix is not to hand the driver fragmented packets at all:
+
+* '''No scatter-gather and no TSO on <code>eth0</code>''': <code>ethtool -K eth0 sg off tso off</code>, applied by a udev rule every time <code>eth0</code> appears. The kernel then builds each packet in one linear buffer itself. The errors stopped at the exact second this was applied, and the copy went on at the same speed (the CPU is the bottleneck anyway, not the NIC).
+* '''A larger free-memory reserve''': <code>vm.min_free_kbytes = 8192</code> (the kernel picked 1979 for 256 MB), so that atomic allocations in the network path find memory.
+
+Both are in <code>ds212j-support</code> 1.8 (<code>/usr/lib/udev/rules.d/70-ds212j-eth0-no-sg.rules</code>, <code>/usr/lib/sysctl.d/60-ds212j-mem.conf</code>). Also, keep copyparty from indexing a large volume while it is being filled (volume flag <code>d2d</code>), because its indexer added to the memory pressure.
+
 <!-- next steps are appended as they are done -->
 
 <span id="appendix--the-device-tree-changes-explained"></span>
