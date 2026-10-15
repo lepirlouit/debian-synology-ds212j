@@ -1,6 +1,8 @@
 #!/bin/sh
 set -e
 if [ "$1" = remove ]; then
+	systemctl disable --now ds212j-hd-idle.service >/dev/null 2>&1 || true
+	systemctl disable var-lib-systemd-timesync.mount >/dev/null 2>&1 || true
 	systemctl disable --now ds212j-logsave.timer >/dev/null 2>&1 || true
 	systemctl stop ds212j-logsave-shutdown.service >/dev/null 2>&1 || true   # saves the journal
 	systemctl disable ds212j-logsave-shutdown.service >/dev/null 2>&1 || true

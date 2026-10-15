@@ -546,21 +546,43 @@ Measured on this unit, level VERY_LOW (2) actually stops the fan. DSM does the s
 
 ## Step 14 – Disk hibernation like DSM
 
-- **Spin-down:** a udev rule applies `hdparm -S` to the two internal disks whenever they
-  appear. The delay is set in `/etc/default/ds212j-disks` (`SPINDOWN_MINUTES=10`, like DSM's
-  "HDD hibernation" setting).
-- **Nothing writes to the disks every few minutes.** journald keeps the journal in RAM
-  (`Storage=volatile`, 16 MB), `rsyslog` is removed, and `ds212j-logsave` appends the journal
-  to `/var/log/journal-saved/YYYY-MM.log` once a day and at every clean shutdown. A power cut
-  loses at most a day of logs. The root filesystem is already mounted `noatime`.
+The first version used only the drives' own standby timer (`hdparm -S`). The disks never
+slept. Two causes were found by measurement:
+
+- **The drives' timer never expires.** `ds212j-fan` reads the disk temperatures with SMART
+  every 20 s, like DSM's scemd. Those commands don't show up as I/O: three `smartctl` runs
+  leave `/proc/diskstats` unchanged. But many drives count them as activity, which resets
+  their internal idle timer.
+- **One last writer on the system disk.** With the system idle, the only file modified on the
+  root filesystem was `/var/lib/systemd/timesync/clock`, which `systemd-timesyncd` rewrites
+  at every NTP sync (up to every ~34 minutes).
+
+The fix does what DSM does, deciding in software when the disks are idle:
+
+- **Spin-down by `hd-idle`.** It watches `/proc/diskstats` and sends `STANDBY IMMEDIATE`
+  (`-c ata`) after `SPINDOWN_MINUTES` without real I/O (10 by default, set in
+  `/etc/default/ds212j-disks`). It runs from its own unit, `ds212j-hd-idle.service`, limited to
+  the two internal disks (`-i 0` for every other disk, so a USB disk is never spun down).
+  Debian's own `hd-idle.service` is disabled: it ignores `START_HD_IDLE=false` and, with no
+  options, would spin down every disk.
+- **timesyncd's state in RAM.** A tmpfs is mounted on `/var/lib/systemd/timesync`. The board
+  has a battery-backed RTC (S-35390A), so the clock file isn't needed across boots.
+- **Logs in RAM.** journald uses `Storage=volatile` (16 MB), `rsyslog` is removed, and
+  `ds212j-logsave` appends the journal to `/var/log/journal-saved/YYYY-MM.log` once a day and
+  at every clean shutdown. A power cut loses at most a day of logs. The root filesystem is
+  mounted `noatime`.
 - **The front panel looks like DSM's.** The DS212j is `HIBER_LED_POWER_ONLY` in Synology's
   source. While both disks are in standby (`hdparm -C`, which doesn't wake them), only the
   power LED stays lit: STATUS goes off (`7`), the LAN LED is forced off, and the green HDD
-  LEDs go off. The "presence" bit
-  of the SATA LED register (`0xF108002C` bit 2) is cleared through `/dev/mem`, so the LEDs only
-  blink on activity. The fan stops too. Everything returns when a disk wakes up.
+  LEDs go off. The "presence" bit of the SATA LED register (`0xF108002C` bit 2) is cleared
+  through `/dev/mem`, so the LEDs only blink on activity. The fan stops too. Everything
+  returns when a disk wakes up.
 
 To check whether the disks are really asleep: `sudo hdparm -C /dev/sda /dev/sdb`.
+
+To find what wakes them, `CONFIG_TASK_IO_ACCOUNTING` is enabled in the kernel config, so
+`/proc/<pid>/io` and `iotop` work. Without it, the files modified recently on the root
+filesystem (`find / -xdev -mmin -3`) and the counters in `/proc/diskstats` are the only clues.
 
 ## Step 15 – copyparty file server
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=DS-212j disk hibernation (spin down the internal disks after inactivity)
+After=local-fs.target
+Conflicts=hd-idle.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ds212j-hd-idle
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

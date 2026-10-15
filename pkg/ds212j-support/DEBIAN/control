@@ -1,8 +1,8 @@
 Package: ds212j-support
-Version: 1.8
+Version: 1.9
 Architecture: all
 Maintainer: lepirlouit <bdb@aloalto.com>
-Depends: mdadm, systemd, util-linux, smartmontools, hdparm, python3, ethtool
+Depends: mdadm, systemd, util-linux, smartmontools, hdparm, python3, ethtool, hd-idle
 Section: admin
 Priority: optional
 Description: Synology DS-212j board support (LEDs, buzzer) for Debian
@@ -16,8 +16,9 @@ Description: Synology DS-212j board support (LEDs, buzzer) for Debian
   - front LAN LED working at 1000 Mb/s too (Ethernet PHY LED configuration);
   - DSM fan modes (full, cool, quiet, low-power) driven by the hottest disk
     temperature, including the 61 C emergency shutdown;
-  - DSM disk hibernation: spin-down delay (10 min by default), journal kept
-    in RAM and saved to disk daily and at shutdown, and while the disks sleep
-    only the power LED stays lit and the fan stops.
+  - DSM disk hibernation: internal disks spun down by hd-idle after 10 min
+    without I/O (by default), journal and timesyncd state kept in RAM (journal
+    saved to disk daily and at shutdown), and while the disks sleep only the
+    power LED stays lit and the fan stops.
   - network that keeps working under memory pressure: no scatter-gather/TSO
     on eth0 and a larger free-memory reserve.

@@ -1,0 +1,17 @@
+[Unit]
+Description=systemd-timesyncd state in RAM (DS-212j disk hibernation)
+# timesyncd rewrites its "clock" file at every NTP sync, which woke the disks.
+# The board has a battery-backed RTC (S-35390A), so the file is not needed across boots.
+Before=systemd-timesyncd.service
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=tmpfs
+Where=/var/lib/systemd/timesync
+Type=tmpfs
+Options=mode=0755,size=64k,nosuid,nodev,noexec
+
+[Install]
+WantedBy=local-fs.target

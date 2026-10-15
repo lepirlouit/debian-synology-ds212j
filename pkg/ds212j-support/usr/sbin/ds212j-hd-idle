@@ -1,0 +1,21 @@
+#!/bin/sh
+# DS-212j disk hibernation, the way DSM does it: watch the real I/O of the two internal
+# disks and spin them down after SPINDOWN_MINUTES without any (hd-idle reads /proc/diskstats).
+# The drives' own standby timer (hdparm -S) is not enough: SMART polling by ds212j-fan
+# (every 20 s, like DSM's scemd) does not show up as I/O but can reset that timer.
+# Other disks (USB) are left alone (-i 0).
+set -eu
+SPINDOWN_MINUTES=10
+[ -r /etc/default/ds212j-disks ] && . /etc/default/ds212j-disks
+if [ "$SPINDOWN_MINUTES" -le 0 ]; then
+	echo "disk hibernation disabled (SPINDOWN_MINUTES=0)"
+	exec sleep infinity
+fi
+set -- -i 0 -c ata
+for b in /sys/block/sd*; do
+	[ -e "$b" ] || continue
+	case "$(readlink -f "$b")" in */ata[12]/*) ;; *) continue ;; esac
+	set -- "$@" -a "${b##*/}" -i $((SPINDOWN_MINUTES * 60))
+done
+echo "hd-idle $*"
+exec /usr/sbin/hd-idle "$@"
