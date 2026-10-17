@@ -1,0 +1,320 @@
+#!/usr/bin/python3 -I
+"""DS-212j board daemon: fan, LEDs and hibernation front panel, like DSM's scemd.
+
+One resident process that never touches the disks while they sleep:
+  - everything it needs is imported and warmed up at start, while the disks are awake;
+  - its memory is locked in RAM (mlockall), so it can't be swapped out to (or re-read
+    from) the RAID that lives on the very disks it lets sleep;
+  - while the disks sleep it only reads /proc and /sys and uses ioctls; smartctl is run
+    only for awake disks; errors are logged on one line (a traceback would re-read
+    the .py sources from disk).
+
+Fan (DSM 6.2.4 scemd.xml, /etc/default/ds212j-fan MODE=full|cool|quiet|low-power):
+  hottest internal disk temperature every 20 s -> DSM speed level -> GPIO 32-34 value via
+  gpio-fan pwm1; speed up at once, slow down after 6 polls in a row; fan stopped while the
+  disks hibernate (except "full"); shutdown at >= 61 C.
+LEDs:
+  amber HDD = disk faulty in an md array or SMART failing; STATUS green = arrays healthy,
+  orange blinking = degraded/missing; while both disks sleep only the POWER LED stays lit
+  (STATUS off, LAN off, green HDD LEDs dark) - Synology HIBER_LED_POWER_ONLY.
+SIGUSR1 (sent by ds212j-leds, e.g. from mdadm's PROGRAM hook): re-evaluate the LEDs now.
+"""
+import ctypes
+import fcntl
+import mmap
+import os
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import termios
+import threading
+import time
+
+PERIOD = 20                 # scemd period="20"
+SLOWDOWN_POLLS = 6          # scemd threshold="6"
+SHUTDOWN_TEMP = 61
+HEALTH_EVERY = 600          # SMART health check of awake disks, seconds
+
+# --- DSM fan tables: (lower bound C, level), highest matching bound wins -----------
+TABLES = {
+    "cool":      [(0, "ULTRA_LOW"), (33, "VERY_LOW"), (41, "LOW"), (47, "VERY_HIGH"), (53, "ULTRA_HIGH")],
+    "quiet":     [(0, "ULTRA_LOW"), (38, "VERY_LOW"), (46, "LOW"), (52, "VERY_HIGH"), (58, "ULTRA_HIGH")],
+    "low-power": [(0, "STOP"), (33, "ULTRA_LOW"), (38, "VERY_LOW"), (46, "LOW"), (52, "VERY_HIGH"), (58, "ULTRA_HIGH")],
+}
+VALUE = {"STOP": 0, "ULTRA_LOW": 1, "VERY_LOW": 2, "MIDDLE": 3, "LOW": 4,
+         "HIGH": 5, "VERY_HIGH": 6, "ULTRA_HIGH": 7, "FULL": 7}
+
+# --- hardware -----------------------------------------------------------------------
+HDIO_DRIVE_CMD = 0x031F
+ATA_CHECK_POWER_MODE = 0xE5
+SATA_BASE, SATA_LED_CTRL, SATA_LED_PRESENCE = 0xF1080000, 0x2C, 1 << 2
+SIOCGMIIPHY, SIOCGMIIREG, SIOCSMIIREG = 0x8947, 0x8948, 0x8949
+MICROP_TTY = "/dev/ttyS1"
+MICROP = {"status-off": b"7", "status-green": b"8", "status-orange-blink": b";", "beep": b"3"}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def mode():
+    m = "low-power"
+    for line in read("/etc/default/ds212j-fan").splitlines():
+        line = line.strip()
+        if line.startswith("MODE="):
+            m = line[5:].strip().strip("'\"")
+    return m if m in TABLES or m == "full" else "low-power"
+
+
+def internal_disks():
+    """{bay: 'sda'} for the two internal SATA bays (ata1, ata2)."""
+    disks = {}
+    for name in os.listdir("/sys/block"):
+        if not name.startswith("sd"):
+            continue
+        path = os.path.realpath("/sys/block/" + name)
+        for bay in (1, 2):
+            if "/ata%d/" % bay in path:
+                disks[bay] = name
+    return disks
+
+
+def asleep(dev):
+    """ATA CHECK POWER MODE (like hdparm -C): True if in standby. Does not wake the disk."""
+    try:
+        fd = os.open("/dev/" + dev, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        args = bytearray([ATA_CHECK_POWER_MODE, 0, 0, 0])
+        fcntl.ioctl(fd, HDIO_DRIVE_CMD, args, True)
+        return args[2] == 0x00
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def smartctl(*args):
+    try:
+        return subprocess.run(["/usr/sbin/smartctl", "-n", "standby", *args],
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        log("smartctl failed: %r" % e)
+        return None
+
+
+def temperature(dev):
+    r = smartctl("-A", "/dev/" + dev)
+    if r is None or r.returncode == 2:     # 2 = in standby, not woken up
+        return None
+    for line in r.stdout.splitlines():
+        f = line.split()
+        if len(f) >= 10 and f[0] in ("194", "190") and f[9].isdigit():
+            return int(f[9])
+    return None
+
+
+def smart_failing(dev):
+    r = smartctl("-H", "/dev/" + dev)
+    return r is not None and r.returncode != 2 and bool(r.returncode & 8)
+
+
+class Board:
+    def __init__(self):
+        self.hwmon = None
+        for h in os.listdir("/sys/class/hwmon"):
+            if read("/sys/class/hwmon/%s/name" % h) == "gpio_fan":
+                self.hwmon = "/sys/class/hwmon/" + h
+        memfd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+        self.sata = mmap.mmap(memfd, mmap.PAGESIZE, mmap.MAP_SHARED,
+                              mmap.PROT_READ | mmap.PROT_WRITE, offset=SATA_BASE)
+        os.close(memfd)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.tty = os.open(MICROP_TTY, os.O_WRONLY | os.O_NOCTTY)
+        attrs = termios.tcgetattr(self.tty)
+        attrs[0] = attrs[1] = attrs[3] = 0                     # raw: no iflag/oflag/lflag
+        attrs[2] = termios.CS8 | termios.CREAD | termios.CLOCAL
+        attrs[4] = attrs[5] = termios.B9600
+        termios.tcsetattr(self.tty, termios.TCSANOW, attrs)
+        self.lock = os.open("/run/ds212j-microp.lock", os.O_WRONLY | os.O_CREAT, 0o644)
+
+    # --- front panel ---
+    def microp(self, what):
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            os.write(self.tty, MICROP[what])
+            termios.tcdrain(self.tty)
+        finally:
+            fcntl.flock(self.lock, fcntl.LOCK_UN)
+
+    def sata_presence(self, on):
+        v = struct.unpack_from("<I", self.sata, SATA_LED_CTRL)[0]
+        v = v | SATA_LED_PRESENCE if on else v & ~SATA_LED_PRESENCE
+        struct.pack_into("<I", self.sata, SATA_LED_CTRL, v)
+
+    def _mii(self, req, phy, reg, val=0):
+        ifr = struct.pack("16sHHHH", b"eth0", phy, reg, val, 0)
+        return struct.unpack("16sHHHH", fcntl.ioctl(self.sock, req, ifr))
+
+    def lan_led(self, on):
+        """88E1116R page 3 reg 16: LED[0] out of dual mode, LED[1] link/activity or off."""
+        phy = self._mii(SIOCGMIIPHY, 0, 0)[1]
+        page = self._mii(SIOCGMIIREG, phy, 22)[4]
+        self._mii(SIOCSMIIREG, phy, 22, 3)
+        try:
+            v = self._mii(SIOCGMIIREG, phy, 16)[4]
+            self._mii(SIOCSMIIREG, phy, 16, (v & 0xFF00) | (0x0010 if on else 0x0080))
+        finally:
+            self._mii(SIOCSMIIREG, phy, 22, page)
+
+    def amber(self, bay, on):
+        try:
+            with open("/sys/class/leds/synology:amber:hdd%d/brightness" % bay, "w") as f:
+                f.write("1" if on else "0")
+        except OSError:
+            pass
+
+    # --- fan ---
+    def fan_value(self, value):
+        if not self.hwmon:
+            return
+        try:
+            with open(self.hwmon + "/pwm1_enable", "w") as f:
+                f.write("1")
+        except OSError:
+            pass
+        with open(self.hwmon + "/pwm1", "w") as f:       # speed index = ceil(pwm*7/255)
+            f.write(str(value * 255 // 7))
+
+
+def md_status(dev_faulty):
+    """('green'|'orange-blink', {dev: faulty}) from /sys/block/md*/md."""
+    status, found = "green", False
+    for md in os.listdir("/sys/block"):
+        base = "/sys/block/%s/md" % md
+        if not md.startswith("md") or not os.path.exists(base + "/array_state"):
+            continue
+        found = True
+        if read(base + "/array_state") in ("clear", "inactive", "suspended"):
+            status = "orange-blink"
+        if read(base + "/degraded", "0") not in ("", "0"):
+            status = "orange-blink"
+        for entry in os.listdir(base):
+            if entry.startswith("dev-") and "faulty" in read("%s/%s/state" % (base, entry)):
+                dev_faulty.add(entry[4:].rstrip("0123456789"))
+    return (status if found else "orange-blink"), dev_faulty
+
+
+def main():
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.mlockall(3) != 0:                          # MCL_CURRENT | MCL_FUTURE
+            log("mlockall failed (errno %d): memory not locked" % ctypes.get_errno())
+    except OSError as e:
+        log("mlockall unavailable: %r" % e)
+
+    board = Board()
+    wake = threading.Event()
+    signal.signal(signal.SIGUSR1, lambda *_: wake.set())
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    fan_mode = mode()
+    log("starting, fan mode %s" % fan_mode)
+    # warm-up while the disks are awake: subprocess/smartctl code paths
+    for dev in internal_disks().values():
+        temperature(dev)
+
+    cur, lower_count, was_asleep, status_sent = None, 0, None, None
+    smart_fault, last_health = {}, 0.0
+    while True:
+        try:
+            disks = internal_disks()
+            sleeping = {bay: asleep(dev) for bay, dev in disks.items()}
+            all_asleep = bool(disks) and all(sleeping.values())
+
+            # --- fan ---
+            temps = [t for bay, dev in disks.items() if not sleeping[bay]
+                     for t in [temperature(dev)] if t is not None]
+            if all_asleep:
+                want = 7 if fan_mode == "full" else 0          # hibernation_speed="STOP"
+            elif not temps:
+                want = 7                                       # no reading: be safe
+            else:
+                t = max(temps)
+                if t >= SHUTDOWN_TEMP:
+                    log("disk temperature %dC >= %dC: shutting down (as DSM does)" % (t, SHUTDOWN_TEMP))
+                    board.fan_value(7)
+                    board.microp("beep")
+                    subprocess.run(["/usr/bin/systemctl", "poweroff"])
+                    return
+                level = "FULL" if fan_mode == "full" else \
+                    [lvl for bound, lvl in TABLES[fan_mode] if t >= bound][-1]
+                want = VALUE[level]
+            if cur is None or want > cur:
+                if want != cur:
+                    log("disks %s: fan level -> %d" % ("asleep" if all_asleep else "%dC" % max(temps or [0]), want))
+                board.fan_value(want)
+                cur, lower_count = want, 0
+            elif want < cur:
+                lower_count += 1
+                if lower_count >= SLOWDOWN_POLLS or all_asleep:
+                    log("disks %s: fan level -> %d" % ("asleep" if all_asleep else "%dC" % max(temps), want))
+                    board.fan_value(want)
+                    cur, lower_count = want, 0
+            else:
+                lower_count = 0
+
+            # --- LEDs ---
+            if all_asleep != was_asleep or wake.is_set():
+                if all_asleep and was_asleep is not None and was_asleep != all_asleep:
+                    log("disks hibernating: only the power LED stays on")
+                elif was_asleep and not all_asleep:
+                    log("disks awake")
+                board.sata_presence(not all_asleep)
+                board.lan_led(not all_asleep)
+            now = time.monotonic()
+            if not all_asleep and (now - last_health >= HEALTH_EVERY or wake.is_set()):
+                for bay, dev in disks.items():
+                    if not sleeping[bay]:
+                        smart_fault[dev] = smart_failing(dev)
+                last_health = now
+            status, faulty = md_status(set())
+            for bay in (1, 2):
+                dev = disks.get(bay)
+                fault = bool(dev) and (dev in faulty or smart_fault.get(dev, False))
+                board.amber(bay, fault)
+                if fault and (was_asleep is None or wake.is_set()):
+                    log("bay %d (%s): FAULT, amber LED on" % (bay, dev))
+            if all_asleep:
+                status = "off"
+            if status != status_sent:
+                board.microp("status-" + status)
+                if status == "orange-blink":
+                    log("volume degraded or missing: STATUS LED orange, blinking")
+                status_sent = status
+                try:
+                    with open("/run/ds212j-status-led", "w") as f:
+                        f.write(status + "\n")
+                except OSError:
+                    pass
+            was_asleep = all_asleep
+            wake.clear()
+        except Exception as e:                                  # one line, no traceback
+            log("error: %r" % e)
+        wake.wait(PERIOD)
+
+
+if __name__ == "__main__":
+    main()

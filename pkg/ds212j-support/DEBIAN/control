@@ -1,5 +1,5 @@
 Package: ds212j-support
-Version: 1.10
+Version: 1.12
 Architecture: all
 Maintainer: lepirlouit <bdb@aloalto.com>
 Depends: mdadm, systemd, util-linux, smartmontools, hdparm, python3, ethtool, hd-idle

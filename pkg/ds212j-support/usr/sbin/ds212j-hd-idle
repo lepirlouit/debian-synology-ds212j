@@ -1,7 +1,7 @@
 #!/bin/sh
 # DS-212j disk hibernation, the way DSM does it: watch the real I/O of the two internal
 # disks and spin them down after SPINDOWN_MINUTES without any (hd-idle reads /proc/diskstats).
-# The drives' own standby timer (hdparm -S) is not enough: SMART polling by ds212j-fan
+# The drives' own standby timer (hdparm -S) is not enough: SMART polling by ds212j-boardd
 # (every 20 s, like DSM's scemd) does not show up as I/O but can reset that timer.
 # Other disks (USB) are left alone (-i 0).
 set -eu

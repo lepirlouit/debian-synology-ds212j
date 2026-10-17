@@ -1,0 +1,16 @@
+[Unit]
+Description=DS-212j board daemon: DSM fan modes, LEDs and hibernation front panel
+After=local-fs.target
+
+[Service]
+ExecStart=/usr/sbin/ds212j-boardd
+Restart=always
+RestartSec=10
+# the daemon locks its memory (mlockall) so it never pages in from the sleeping disks
+LimitMEMLOCK=infinity
+SyslogIdentifier=ds212j-boardd
+# if the daemon dies, leave the fan at full speed ("$$" and "%%" are systemd escapes)
+ExecStopPost=/bin/sh -c 'for n in /sys/class/hwmon/hwmon*/name; do [ "$$(cat $$n)" = gpio_fan ] && echo 255 > "$${n%%/name}/pwm1"; done; true'
+
+[Install]
+WantedBy=multi-user.target

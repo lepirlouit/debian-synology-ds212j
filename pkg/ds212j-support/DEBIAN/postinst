@@ -29,10 +29,13 @@ if [ "$1" = configure ]; then
 	/usr/sbin/ethtool -K eth0 sg off tso off >/dev/null 2>&1 || true
 	sysctl -q -p /usr/lib/sysctl.d/60-ds212j-mem.conf >/dev/null 2>&1 || true
 	systemctl try-restart mdmonitor.service >/dev/null 2>&1 || true
-	systemctl enable ds212j-power-led.service ds212j-leds.timer ds212j-fan.service >/dev/null 2>&1 || true
-	systemctl start ds212j-leds.timer >/dev/null 2>&1 || true
-	systemctl restart ds212j-fan.service >/dev/null 2>&1 || true
-	/usr/sbin/ds212j-phy-led on >/dev/null 2>&1 || true
+	# 1.11: ds212j-fan + ds212j-leds.timer replaced by the resident ds212j-boardd
+	systemctl stop ds212j-fan.service ds212j-leds.timer ds212j-leds.service >/dev/null 2>&1 || true
+	rm -f /etc/systemd/system/multi-user.target.wants/ds212j-fan.service \
+	      /etc/systemd/system/timers.target.wants/ds212j-leds.timer
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	systemctl reset-failed ds212j-fan.service ds212j-leds.timer ds212j-leds.service >/dev/null 2>&1 || true
+	systemctl enable ds212j-power-led.service ds212j-boardd.service >/dev/null 2>&1 || true
 	rm -f /run/ds212j-status-led
-	systemctl start ds212j-leds.service >/dev/null 2>&1 || true
+	systemctl restart ds212j-boardd.service >/dev/null 2>&1 || true
 fi

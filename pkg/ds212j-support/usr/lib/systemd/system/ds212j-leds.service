@@ -1,7 +1,0 @@
-[Unit]
-Description=DS-212j disk-health LEDs (amber HDD LEDs, STATUS LED)
-After=mdadm-waitidle.service local-fs.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/ds212j-leds

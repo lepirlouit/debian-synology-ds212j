@@ -4,5 +4,5 @@
 #   cool       Cool mode:       faster, cooler, louder
 #   quiet      Quiet mode:      slower, quieter, warmer
 #   low-power  Low-power mode:  like quiet, and the fan stops while the disks are cold
-# After changing it: sudo systemctl restart ds212j-fan
+# After changing it: sudo systemctl restart ds212j-boardd
 MODE=low-power

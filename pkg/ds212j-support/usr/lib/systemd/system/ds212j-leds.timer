@@ -1,9 +1,0 @@
-[Unit]
-Description=Periodic check of the DS-212j disk-health LEDs
-
-[Timer]
-OnBootSec=30s
-OnUnitActiveSec=10min
-
-[Install]
-WantedBy=timers.target
