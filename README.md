@@ -567,6 +567,11 @@ The fix does what DSM does, deciding in software when the disks are idle:
   options, would spin down every disk.
 - **timesyncd's state in RAM.** A tmpfs is mounted on `/var/lib/systemd/timesync`. The board
   has a battery-backed RTC (S-35390A), so the clock file isn't needed across boots.
+- **smartd's state in RAM.** With `hd-idle` in place, its journal showed the disks going to
+  sleep and then both spinning up again at about :04 and :34 every hour. That is smartd's
+  30-minute cycle: even with `-n standby` (it doesn't query a sleeping disk), it writes its
+  state and attribute files to `/var/lib/smartmontools/`, on the root RAID, so on those same
+  disks. A tmpfs is mounted there too; only the attribute history is lost at reboot.
 - **Logs in RAM.** journald uses `Storage=volatile` (16 MB), `rsyslog` is removed, and
   `ds212j-logsave` appends the journal to `/var/log/journal-saved/YYYY-MM.log` once a day and
   at every clean shutdown. A power cut loses at most a day of logs. The root filesystem is

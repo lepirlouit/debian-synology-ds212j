@@ -1,0 +1,18 @@
+[Unit]
+Description=smartd state and attribute logs in RAM (DS-212j disk hibernation)
+# smartd checks the disks every 30 min and, even when it skips sleeping disks
+# (-n standby), writes its state files here: on the root RAID, i.e. on the very
+# disks it just let sleep, which woke them up twice an hour.
+Before=smartmontools.service
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=tmpfs
+Where=/var/lib/smartmontools
+Type=tmpfs
+Options=mode=0755,size=1M,nosuid,nodev,noexec
+
+[Install]
+WantedBy=local-fs.target
