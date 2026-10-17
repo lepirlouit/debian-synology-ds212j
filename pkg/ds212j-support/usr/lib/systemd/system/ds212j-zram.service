@@ -1,0 +1,16 @@
+[Unit]
+Description=DS-212j compressed swap in RAM (zram, used before the swap on the disks)
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=swap.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ds212j-zram start
+ExecStop=/usr/sbin/ds212j-zram stop
+
+[Install]
+WantedBy=swap.target

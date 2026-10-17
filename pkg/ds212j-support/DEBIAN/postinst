@@ -25,6 +25,12 @@ if [ "$1" = configure ]; then
 	systemctl start var-lib-smartmontools.mount >/dev/null 2>&1 || true
 	systemctl try-restart smartmontools.service >/dev/null 2>&1 || true
 	systemctl restart ds212j-hd-idle.service >/dev/null 2>&1 || true
+	# swap in RAM first (zram), then move the pages already on the disk swap back
+	# into RAM/zram, if there is clearly enough memory for them...
+	systemctl enable ds212j-zram.service >/dev/null 2>&1 || true
+	systemctl start ds212j-zram.service >/dev/null 2>&1 || true
+	# ... once apt has exited and given its memory back
+	systemd-run --quiet --on-active=60 --unit=ds212j-zram-reclaim /usr/sbin/ds212j-zram reclaim >/dev/null 2>&1 || true
 	# network under memory pressure (udev rule applies it at every boot)
 	/usr/sbin/ethtool -K eth0 sg off tso off >/dev/null 2>&1 || true
 	sysctl -q -p /usr/lib/sysctl.d/60-ds212j-mem.conf >/dev/null 2>&1 || true

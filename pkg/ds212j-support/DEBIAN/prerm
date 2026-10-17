@@ -2,6 +2,7 @@
 set -e
 if [ "$1" = remove ]; then
 	systemctl disable --now ds212j-hd-idle.service >/dev/null 2>&1 || true
+	systemctl disable ds212j-zram.service >/dev/null 2>&1 || true   # stays active until reboot
 	systemctl disable var-lib-systemd-timesync.mount >/dev/null 2>&1 || true
 	systemctl disable var-lib-smartmontools.mount >/dev/null 2>&1 || true
 	systemctl disable --now ds212j-logsave.timer >/dev/null 2>&1 || true

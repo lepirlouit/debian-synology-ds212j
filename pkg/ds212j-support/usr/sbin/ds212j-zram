@@ -1,0 +1,46 @@
+#!/bin/sh
+# DS-212j: compressed swap in RAM (zram), used before the swap on the disks (md1).
+# Swap on md1 lives on the very disks that hibernate: a sleeping process whose pages had
+# been swapped out there (copyparty: ~26 MB after the media migration) woke the disks up
+# with every swap-in. zram (priority 100) takes the swap-outs; md1 (default priority) is
+# only used when zram is full. zswap (a compressed cache in front of disk swap) is
+# disabled: in front of zram it would only compress twice.
+# usage: ds212j-zram start|stop|reclaim
+#   reclaim: move the pages already on the disk swap back into RAM/zram (swapoff +
+#   swapon), only if MemAvailable stays above 64 MB afterwards
+set -eu
+SIZE=${ZRAM_SIZE:-96M}
+ALGO=${ZRAM_ALGO:-lzo-rle}
+case "${1:-}" in
+start)
+	[ -w /sys/module/zswap/parameters/enabled ] && echo N > /sys/module/zswap/parameters/enabled
+	[ -e /sys/block/zram0 ] || modprobe zram num_devices=1
+	if ! grep -q '^/dev/zram0 ' /proc/swaps; then
+		echo 1 > /sys/block/zram0/reset 2>/dev/null || true
+		echo "$ALGO" > /sys/block/zram0/comp_algorithm 2>/dev/null || true
+		echo "$SIZE" > /sys/block/zram0/disksize
+		mkswap -q /dev/zram0
+		swapon -p 100 /dev/zram0
+	fi
+	;;
+stop)
+	if grep -q '^/dev/zram0 ' /proc/swaps; then
+		swapoff /dev/zram0
+		echo 1 > /sys/block/zram0/reset
+	fi
+	;;
+reclaim)
+	avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+	for sw in $(awk 'NR>1 && $1 !~ /zram/ {print $1}' /proc/swaps); do
+		used=$(awk -v d="$sw" '$1==d {print $4}' /proc/swaps)
+		[ "${used:-0}" -gt 0 ] || continue
+		if [ $((avail - used)) -gt 65536 ]; then
+			swapoff "$sw" && swapon "$sw" && echo "$sw: ${used} kB moved back into RAM/zram"
+		else
+			echo "$sw: ${used} kB in use, not enough free memory to move it back (${avail} kB available)"
+		fi
+	done
+	;;
+*)
+	echo "usage: $0 start|stop|reclaim" >&2; exit 2 ;;
+esac

@@ -1,5 +1,5 @@
 Package: ds212j-support
-Version: 1.12
+Version: 1.14
 Architecture: all
 Maintainer: lepirlouit <bdb@aloalto.com>
 Depends: mdadm, systemd, util-linux, smartmontools, hdparm, python3, ethtool, hd-idle
@@ -19,6 +19,7 @@ Description: Synology DS-212j board support (LEDs, buzzer) for Debian
   - DSM disk hibernation: internal disks spun down by hd-idle after 10 min
     without I/O (by default), journal, timesyncd and smartd state kept in RAM (journal
     saved to disk daily and at shutdown), and while the disks sleep only the
-    power LED stays lit and the fan stops.
+    power LED stays lit and the fan stops; swap goes to compressed RAM (zram)
+    first, so sleeping processes don't page in from the sleeping disks.
   - network that keeps working under memory pressure: no scatter-gather/TSO
     on eth0 and a larger free-memory reserve.
