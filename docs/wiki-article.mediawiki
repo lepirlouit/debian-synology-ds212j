@@ -437,22 +437,62 @@ The mode is set in <code>/etc/default/ds212j-fan</code> (<code>MODE=full|cool|qu
 <span id="step-14--disk-hibernation-like-dsm"></span>
 == Step 14 – Disk hibernation like DSM ==
 
-The first version used only the drives' own standby timer (<code>hdparm -S</code>). The disks never slept. Two causes were found by measurement:
+Getting the disks to actually stay asleep took a series of measurements. Each fix revealed the next thing that woke them up. The tools were <code>hdparm -C</code> (power state, doesn't wake the disk), the counters in <code>/proc/diskstats</code> (per disk and per md array, so the system RAID, swap and data can be told apart), files recently modified on the root filesystem (<code>find / -xdev -mmin -N</code>), and the <code>hd-idle</code> and <code>ds212j-boardd</code> journals, which are kept in RAM. Every SSH login writes <code>/var/log/wtmp</code>, and that write reaches the disk tens of seconds later, so tests must run from a single, long-lived session.
 
-* '''The drives' timer never expires.''' <code>ds212j-fan</code> reads the disk temperatures with SMART every 20 s, like DSM's scemd. Those commands don't show up as I/O: three <code>smartctl</code> runs leave <code>/proc/diskstats</code> unchanged. But many drives count them as activity, which resets their internal idle timer.
-* '''One last writer on the system disk.''' With the system idle, the only file modified on the root filesystem was <code>/var/lib/systemd/timesync/clock</code>, which <code>systemd-timesyncd</code> rewrites at every NTP sync (up to every ~34 minutes).
+{| class="wikitable"
+|-
+! #
+! Symptom
+! Cause
+! Fix
+|-
+| 1
+| the disks never slept
+| the drives' own standby timer (<code>hdparm -S</code>) is reset by SMART commands; <code>ds212j-fan</code> read the temperatures every 20 s like DSM's scemd (SMART reads don't appear in <code>/proc/diskstats</code>)
+| software spin-down by '''<code>hd-idle</code>''' (diskstats-based, <code>ATA STANDBY IMMEDIATE</code>), internal disks only
+|-
+| 2
+| one write on the root disk now and then
+| <code>systemd-timesyncd</code> rewrites <code>/var/lib/systemd/timesync/clock</code> at every NTP sync
+| tmpfs on that directory (the board has a battery-backed RTC)
+|-
+| 3
+| both disks woke at :04 and :34 every hour
+| smartd's 30-minute cycle writes its state files to <code>/var/lib/smartmontools</code>, on the root RAID, even when it skips the sleeping disks (<code>-n standby</code>)
+| tmpfs on <code>/var/lib/smartmontools</code>
+|-
+| 4
+| a wake-up one minute after falling asleep
+| the hibernation LED handler started Python, which had dropped out of the page cache on a 256 MB box, so it was read back from the RAID (the handler took 9 s instead of 1: a spin-up)
+| '''<code>ds212j-boardd</code>''', one resident daemon (below)
+|-
+| 5
+| sda woke up with '''no I/O at all''' (diskstats unchanged, sdb still asleep)
+| the drive itself: SMART automatic offline data collection and attribute autosave (enterprise Seagate ST32000644NS)
+| <code>smartctl -o off -S off /dev/sda /dev/sdb</code> (stored in the drive; it still saves its SMART data before entering standby)
+|-
+| 6
+| wake-ups with reads on '''md1''' (swap)
+| copyparty had ~26 MB swapped out to md1 since the big media copy; every wake-up of one of its threads paged in from the sleeping disks
+| '''swap in compressed RAM''' (zram, priority 100) before md1
+|-
+| 7
+| about 10 short wake-ups a night
+| apt (twice), dpkg backup, logrotate, man-db, e2scrub, mdcheck, <code>cron.daily</code>/<code>cron.hourly</code>, and our log save, each at its own randomised time
+| all maintenance timers grouped at '''04:00'''; cron disabled (it had nothing left to do)
+|}
 
-The fix does what DSM does, deciding in software when the disks are idle:
+After fixes 1–6, a night's journal showed the disks asleep for up to 3 h 24 at a time, and every remaining wake-up matched a scheduled maintenance task (7) or the DHCP lease renewal (every ~10 h).
 
-* '''Spin-down by <code>hd-idle</code>.''' It watches <code>/proc/diskstats</code> and sends <code>STANDBY IMMEDIATE</code> (<code>-c ata</code>) after <code>SPINDOWN_MINUTES</code> without real I/O (10 by default, set in <code>/etc/default/ds212j-disks</code>). It runs from its own unit, <code>ds212j-hd-idle.service</code>, limited to the two internal disks (<code>-i 0</code> for every other disk, so a USB disk is never spun down). Debian's own <code>hd-idle.service</code> is disabled: it ignores <code>START_HD_IDLE=false</code> and, with no options, would spin down every disk.
-* '''timesyncd's state in RAM.''' A tmpfs is mounted on <code>/var/lib/systemd/timesync</code>. The board has a battery-backed RTC (S-35390A), so the clock file isn't needed across boots.
-* '''smartd's state in RAM.''' With <code>hd-idle</code> in place, its journal showed the disks going to sleep and then both spinning up again at about :04 and :34 every hour. That is smartd's 30-minute cycle: even with <code>-n standby</code> (it doesn't query a sleeping disk), it writes its state and attribute files to <code>/var/lib/smartmontools/</code>, on the root RAID, so on those same disks. A tmpfs is mounted there too; only the attribute history is lost at reboot.
-* '''Logs in RAM.''' journald uses <code>Storage=volatile</code> (16 MB), <code>rsyslog</code> is removed, and <code>ds212j-logsave</code> appends the journal to <code>/var/log/journal-saved/YYYY-MM.log</code> once a day and at every clean shutdown. A power cut loses at most a day of logs. The root filesystem is mounted <code>noatime</code>.
-* '''The front panel looks like DSM's.''' The DS212j is <code>HIBER_LED_POWER_ONLY</code> in Synology's source. While both disks are in standby (<code>hdparm -C</code>, which doesn't wake them), only the power LED stays lit: STATUS goes off (<code>7</code>), the LAN LED is forced off, and the green HDD LEDs go off. The &quot;presence&quot; bit of the SATA LED register (<code>0xF108002C</code> bit 2) is cleared through <code>/dev/mem</code>, so the LEDs only blink on activity. The fan stops too. Everything returns when a disk wakes up.
+What <code>ds212j-support</code> does:
 
-To check whether the disks are really asleep: <code>sudo hdparm -C /dev/sda /dev/sdb</code>.
+* '''<code>ds212j-hd-idle.service</code>''' runs <code>hd-idle -i 0 -c ata -a sda -i 600 -a sdb -i 600</code>. The delay comes from <code>SPINDOWN_MINUTES</code> in <code>/etc/default/ds212j-disks</code> (10 by default). A USB disk is never spun down. Debian's own <code>hd-idle.service</code> is disabled: it ignores <code>START_HD_IDLE=false</code> and, with no options, would spin down every disk.
+* '''<code>ds212j-boardd</code>''' is one resident Python process for the fan, the LEDs and the hibernation front panel, like DSM's scemd. Everything is imported and warmed up at start while the disks are awake, and its memory is locked (<code>mlockall</code>), so it can't be swapped out to, or re-read from, the RAID on the sleeping disks. While they sleep it only reads <code>/proc</code> and <code>/sys</code>, gets the disk state with the <code>HDIO_DRIVE_CMD</code> CHECK POWER MODE ioctl (what <code>hdparm -C</code> does), and switches the LEDs in-process (<code>/dev/mem</code>, MII ioctl, <code>/dev/ttyS1</code>). It runs <code>smartctl</code> only for awake disks, and logs errors on one line, because a traceback would read the <code>.py</code> sources from disk.
+* '''The front panel looks like DSM's.''' The DS212j is <code>HIBER_LED_POWER_ONLY</code> in Synology's source. While both disks are in standby, only the power LED stays lit: STATUS off, LAN LED forced off, and green HDD LEDs dark (the &quot;presence&quot; bit of the SATA LED register, <code>0xF108002C</code> bit 2, is cleared). The fan stops too. Everything returns when a disk wakes up.
+* '''In RAM:''' the journal (<code>Storage=volatile</code>, 16 MB, saved by <code>ds212j-logsave</code> to <code>/var/log/journal-saved/YYYY-MM.log</code> daily and at shutdown; <code>rsyslog</code> removed), timesyncd's and smartd's state (tmpfs), and swap (<code>ds212j-zram.service</code>: 96 MB lzo-rle, zswap disabled; <code>ds212j-zram reclaim</code> moves pages already on md1 back). The root filesystem is mounted <code>noatime</code>.
+* '''Maintenance window:''' drop-ins <code>*.timer.d/ds212j-maintenance.conf</code> move apt-daily, apt-daily-upgrade, dpkg-db-backup, logrotate, man-db, mdcheck_continue, mdmonitor-oneshot, systemd-tmpfiles-clean and ds212j-logsave to 04:00 UTC, with no random delay. e2scrub and fstrim run on Sunday at 04:00, and the monthly RAID check on the first Sunday at 04:00. <code>cron.service</code> is disabled when no personal crontab exists: every <code>cron.daily</code> script defers to its systemd timer, and <code>cron.hourly</code> is empty.
 
-To find what wakes them, <code>CONFIG_TASK_IO_ACCOUNTING</code> is enabled in the kernel config, so <code>/proc/&lt;pid&gt;/io</code> and <code>iotop</code> work. Without it, the files modified recently on the root filesystem (<code>find / -xdev -mmin -3</code>) and the counters in <code>/proc/diskstats</code> are the only clues.
+To check: <code>sudo hdparm -C /dev/sda /dev/sdb</code> and <code>journalctl -u ds212j-hd-idle -u ds212j-boardd</code>. <code>CONFIG_TASK_IO_ACCOUNTING</code> (<code>/proc/&lt;pid&gt;/io</code>, <code>iotop</code>) is enabled in the kernel config for the next build. <code>CONFIG_FANOTIFY</code> (for <code>fatrace</code>, which shows which program reads which file) would be the next diagnostic tool to add.
 
 <span id="step-15--copyparty-file-server"></span>
 == Step 15 – copyparty file server ==

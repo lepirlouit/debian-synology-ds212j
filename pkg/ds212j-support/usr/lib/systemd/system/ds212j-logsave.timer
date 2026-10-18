@@ -2,8 +2,8 @@
 Description=Save the in-RAM journal to disk once a day
 
 [Timer]
-OnCalendar=*-*-* 04:00
-RandomizedDelaySec=30min
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=0
 
 [Install]
 WantedBy=timers.target

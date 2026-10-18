@@ -35,6 +35,17 @@ if [ "$1" = configure ]; then
 	/usr/sbin/ethtool -K eth0 sg off tso off >/dev/null 2>&1 || true
 	sysctl -q -p /usr/lib/sysctl.d/60-ds212j-mem.conf >/dev/null 2>&1 || true
 	systemctl try-restart mdmonitor.service >/dev/null 2>&1 || true
+	# nightly maintenance grouped at 04:00 (timer drop-ins *.timer.d/ds212j-maintenance.conf)
+	for t in apt-daily apt-daily-upgrade dpkg-db-backup logrotate man-db mdcheck_continue \
+	         mdmonitor-oneshot e2scrub_all fstrim mdcheck_start systemd-tmpfiles-clean ds212j-logsave; do
+		systemctl try-restart "$t.timer" >/dev/null 2>&1 || true
+	done
+	# cron has nothing left to do (every cron.daily script defers to its systemd timer,
+	# cron.hourly is empty) but its periodic directory scans woke the disks: disable it,
+	# unless somebody uses a personal crontab
+	if [ -z "$(ls -A /var/spool/cron/crontabs 2>/dev/null)" ]; then
+		systemctl disable --now cron.service >/dev/null 2>&1 || true
+	fi
 	# 1.11: ds212j-fan + ds212j-leds.timer replaced by the resident ds212j-boardd
 	systemctl stop ds212j-fan.service ds212j-leds.timer ds212j-leds.service >/dev/null 2>&1 || true
 	rm -f /etc/systemd/system/multi-user.target.wants/ds212j-fan.service \
