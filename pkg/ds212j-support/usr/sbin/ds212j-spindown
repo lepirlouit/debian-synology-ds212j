@@ -1,6 +1,10 @@
 #!/bin/sh
-# Apply the DS-212j disk hibernation delay to an internal disk (bay 1/2 = ata1/ata2).
-# Called by udev with the device node, e.g. /dev/sda.
+# Prepare an internal disk (bay 1/2 = ata1/ata2) for hibernation. Called by udev with the
+# device node (e.g. /dev/sda) when the disk appears, and after every smartd (re)start.
+#  - hdparm -S: the drive's own standby timer, as a fallback (hd-idle does the real work)
+#  - smartctl -o off -S off: no automatic offline data collection / attribute autosave.
+#    These enterprise Seagates (ST32000644NS) otherwise leave standby on their own to run
+#    them, and smartd's SMART ENABLE at startup switches offline collection back on.
 set -u
 dev=$1
 case "$(readlink -f /sys/class/block/${dev##*/})" in */ata[12]/*) ;; *) exit 0 ;; esac
@@ -12,3 +16,6 @@ elif [ "$m" -le 20 ]; then s=$(( m * 12 ))          # units of 5 s
 else                       s=$(( 240 + m / 30 ))    # units of 30 min
 fi
 /usr/sbin/hdparm -q -S "$s" "$dev"
+# -n standby: never wake a sleeping disk for this (it is re-applied at the next occasion)
+[ -x /usr/sbin/smartctl ] && /usr/sbin/smartctl -q silent -n standby -o off -S off "$dev"
+exit 0

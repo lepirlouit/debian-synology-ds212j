@@ -469,7 +469,7 @@ Getting the disks to actually stay asleep took a series of measurements. Each fi
 | 5
 | sda woke up with '''no I/O at all''' (diskstats unchanged, sdb still asleep)
 | the drive itself: SMART automatic offline data collection and attribute autosave (enterprise Seagate ST32000644NS)
-| <code>smartctl -o off -S off /dev/sda /dev/sdb</code> (stored in the drive; it still saves its SMART data before entering standby)
+| <code>smartctl -o off -S off</code> on both drives (they still save their SMART data before entering standby). smartd's SMART ENABLE at startup switches offline collection back on, so <code>ds212j-spindown</code> re-applies it when a disk appears (udev) and after every smartd start (<code>ExecStartPost</code>)
 |-
 | 6
 | wake-ups with reads on '''md1''' (swap)
