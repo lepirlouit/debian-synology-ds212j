@@ -614,7 +614,12 @@ and thumbnails (`python3-pil`, `ffmpeg`).
   published on GitHub and installed in `/usr/local/bin`.
 - It runs as a dedicated `copyparty` user under a hardened unit
   ([`config/copyparty/copyparty.service`](config/copyparty/copyparty.service)):
-  `ProtectSystem=strict`, with only `/srv/files` and `/var/lib/copyparty` writable.
+  `ProtectSystem=strict`, with only `/srv/files`, `/srv/media` and `/var/lib/copyparty`
+  writable. A folder shared through copyparty needs both: listed in `ReadWritePaths`, and
+  writable by the `copyparty` user. The shared folders belong to group `copyparty` (setgid
+  directories, group-writable), the admin user is in that group, and the unit sets
+  `UMask=0002`, so files created over the web/WebDAV stay editable over SSH and vice versa.
+  The copyparty account rights alone (`rwmda`) aren't enough.
 - The config is [`/etc/copyparty/copyparty.conf`](config/copyparty/copyparty.conf.template):
   one account with full rights on `/srv/files` (RAID1), no anonymous access, and the index
   and thumbnails kept in `/var/lib/copyparty`.

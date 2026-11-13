@@ -11,17 +11,19 @@ User=copyparty
 Group=copyparty
 WorkingDirectory=/var/lib/copyparty
 Environment=PYTHONUNBUFFERED=x
+# new files group-writable: /srv/files and /srv/media are group copyparty (setgid), shared with the admin user
+UMask=0002
 ExecStart=/usr/bin/python3 /usr/local/bin/copyparty-sfx.py -c /etc/copyparty/copyparty.conf
 ExecReload=/bin/kill -s USR1 $MAINPID
 Restart=on-failure
 RestartSec=10
-# hardening: read-only system, only the shared folder and its state are writable
+# hardening: read-only system, only the shared folders and its state are writable
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ReadWritePaths=/srv/files /var/lib/copyparty
+ReadWritePaths=/srv/files /srv/media /var/lib/copyparty
 
 [Install]
 WantedBy=multi-user.target
